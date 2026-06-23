@@ -1,0 +1,6 @@
+Agent -> Server : REGISTER
+Server -> Agent : CHALLENGE
+Agent -> Server : PROOF
+Server -> Agent : AUTH_OK
+Agent -> Server : HEARTBEAT
+Agent -> Server : SYSTEM_INFO
