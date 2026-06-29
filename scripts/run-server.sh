@@ -6,7 +6,6 @@ cd "$ROOT"
 
 PORT=3000
 
-# Stop a previous server instance so restarts don't fail with "Address already in use"
 if pids=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); then
   echo "Stopping existing server on port $PORT (PID: ${pids//$'\n'/ })..."
   kill $pids 2>/dev/null || true
@@ -21,9 +20,17 @@ if pids=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); then
   fi
 fi
 
+export C2_PSK="${C2_PSK:-educational-c2-psk-key}"
+
+echo "Building React dashboard..."
+if [ -d "$ROOT/dashboard-react" ]; then
+  (cd "$ROOT/dashboard-react" && npm install --silent && npm run build)
+fi
+
 echo "Building server..."
 cargo build -p server --release
 
 echo "Starting C2 server on http://localhost:$PORT"
-echo "Beacon endpoint: POST http://localhost:$PORT/api/beacon"
+echo "Beacon endpoint: POST http://localhost:$PORT/api/beacon (AES-GCM encrypted)"
+echo "Dashboard:       http://localhost:$PORT"
 exec cargo run -p server --release

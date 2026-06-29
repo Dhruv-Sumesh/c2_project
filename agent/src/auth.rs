@@ -16,3 +16,11 @@ pub fn solve_challenge(nonce: &str) -> String {
     let result = mac.finalize();
     hex::encode(result.into_bytes())
 }
+
+pub fn compute_agent_token(agent_id: &str) -> String {
+    let psk = get_psk();
+    let mut mac = HmacSha256::new_from_slice(psk.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(agent_id.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}

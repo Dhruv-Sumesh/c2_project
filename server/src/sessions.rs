@@ -19,6 +19,10 @@ impl SessionManager {
     }
 
     pub fn start_session(&self, agent_id: &str) -> Result<String, rusqlite::Error> {
+        if let Some(existing) = self.active_sessions.lock().unwrap().get(agent_id) {
+            return Ok(existing.clone());
+        }
+
         let session_id = Uuid::new_v4().to_string();
         let started_at = Utc::now().to_rfc3339();
 

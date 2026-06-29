@@ -6,10 +6,67 @@ export function useSocket() {
   const [metricsHistory, setMetricsHistory] = useState(new Map());
   const [isConnected, setIsConnected] = useState(false);
 
+  const handleMessage = useCallback((msg) => {
+    const payload = msg.payload;
+
+    switch (msg.type) {
+      case "InitialAgents":
+        setAgents(new Map(payload.map(a => [a.id, a])));
+        break;
+
+      case "InitialLogs":
+        setLogs(payload.reverse());
+        break;
+
+      case "Log":
+        setLogs(prev => [...prev, payload]);
+        break;
+
+      case "AgentStatus":
+        setAgents(prev => {
+          const newMap = new Map(prev);
+          const existing = newMap.get(payload.id);
+          newMap.set(payload.id, {
+            ...(existing || {}),
+            id: payload.id,
+            hostname: payload.hostname ?? existing?.hostname ?? 'unknown',
+            os: payload.os ?? existing?.os ?? 'unknown',
+            status: payload.status,
+            last_seen: payload.last_seen,
+          });
+          return newMap;
+        });
+        break;
+
+      case "Metrics":
+        setMetricsHistory(prev => {
+          const newMap = new Map(prev);
+          const history = newMap.get(payload.agent_id) || [];
+          const newHistory = [...history, payload];
+          if (newHistory.length > 50) newHistory.shift();
+          newMap.set(payload.agent_id, newHistory);
+          return newMap;
+        });
+        break;
+
+      case "CommandResult":
+        setLogs(prev => [...prev, {
+          level: "INFO",
+          source: "Result",
+          agent_id: payload.agent_id,
+          message: `Command ${payload.command_id.substring(0, 8)} ${payload.status}`,
+          timestamp: payload.timestamp,
+        }]);
+        break;
+
+      default:
+        break;
+    }
+  }, []);
+
   useEffect(() => {
     let wsUri = window.location.protocol === "https:" ? "wss:" : "ws:";
-    
-    // Check if we're running locally via Vite dev server
+
     if (window.location.port === "5173") {
       wsUri = "ws://localhost:3000/api/dashboard/ws";
     } else if (window.location.host) {
@@ -32,53 +89,33 @@ export function useSocket() {
       }
     };
 
-    return () => socket.close();
-  }, []);
+    // Poll agents/metrics as backup (beacon mode has 20-60s jitter)
+    const apiBase = window.location.port === "5173"
+      ? "http://localhost:3000"
+      : window.location.origin;
 
-  const handleMessage = useCallback((msg) => {
-    const payload = msg.payload;
-    
-    switch (msg.type) {
-      case "InitialAgents":
-        setAgents(new Map(payload.map(a => [a.id, a])));
-        break;
-        
-      case "InitialLogs":
-        setLogs(payload.reverse());
-        break;
-
-      case "Log":
-        setLogs(prev => [...prev, payload]);
-        break;
-
-      case "AgentStatus":
-        setAgents(prev => {
-          const newMap = new Map(prev);
-          const agent = newMap.get(payload.id);
-          if (agent) {
-            newMap.set(payload.id, { ...agent, status: payload.status, last_seen: payload.last_seen });
-          } else {
-            // New agent logic would normally trigger a full refresh here
+    const poll = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/agents`);
+        if (res.ok) {
+          const agentList = await res.json();
+          if (Array.isArray(agentList)) {
+            setAgents(new Map(agentList.map(a => [a.id, a])));
           }
-          return newMap;
-        });
-        break;
+        }
+      } catch {
+        // server may be down
+      }
+    };
 
-      case "Metrics":
-        setMetricsHistory(prev => {
-          const newMap = new Map(prev);
-          const history = newMap.get(payload.agent_id) || [];
-          const newHistory = [...history, payload];
-          if (newHistory.length > 50) newHistory.shift();
-          newMap.set(payload.agent_id, newHistory);
-          return newMap;
-        });
-        break;
-      
-      default:
-        break;
-    }
-  }, []);
+    poll();
+    const pollInterval = setInterval(poll, 15000);
+
+    return () => {
+      clearInterval(pollInterval);
+      socket.close();
+    };
+  }, [handleMessage]);
 
   return { agents, logs, metricsHistory, isConnected };
 }

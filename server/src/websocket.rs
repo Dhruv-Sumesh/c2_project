@@ -2,15 +2,25 @@ use axum::{
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
     response::IntoResponse,
 };
-use tokio::sync::{mpsc, broadcast};
+use tokio::sync::{mpsc, broadcast, RwLock};
 use serde_json::{json, Value};
 use futures_util::{StreamExt, SinkExt};
+use std::collections::HashMap;
+use std::sync::Arc;
 use crate::db::{Database, Agent, AgentMetrics};
 use crate::registry::AgentRegistry;
 use crate::sessions::SessionManager;
 use crate::logger::{log_info, log_warn};
 use crate::auth;
 use chrono::Utc;
+use serde::Serialize;
+
+#[derive(Serialize, Clone)]
+pub struct PendingCommand {
+    pub id: String,
+    pub command_type: String,
+    pub payload: String,
+}
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -18,6 +28,7 @@ pub struct ServerState {
     pub registry: AgentRegistry,
     pub session_manager: SessionManager,
     pub tx: broadcast::Sender<Value>,
+    pub command_queue: Arc<RwLock<HashMap<String, Vec<PendingCommand>>>>,
 }
 
 pub async fn agent_ws_handler(

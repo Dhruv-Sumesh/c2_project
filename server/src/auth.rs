@@ -20,7 +20,18 @@ pub fn verify_proof(nonce: &str, signature: &str) -> bool {
     mac.update(nonce.as_bytes());
     let expected_bytes = mac.finalize().into_bytes();
     let expected_signature = hex::encode(expected_bytes);
-    
-    // Constant-time comparison or simple safe string comparison
+
     expected_signature == signature
+}
+
+pub fn compute_agent_token(agent_id: &str) -> String {
+    let psk = get_psk();
+    let mut mac = HmacSha256::new_from_slice(psk.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(agent_id.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+pub fn verify_agent_token(agent_id: &str, token: &str) -> bool {
+    compute_agent_token(agent_id) == token
 }
