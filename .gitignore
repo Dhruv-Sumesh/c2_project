@@ -1,4 +1,6 @@
 /target/
 /c2_simulator.db
 /agent_id.txt
+/session_key.txt
+/certs/
 .DS_Store

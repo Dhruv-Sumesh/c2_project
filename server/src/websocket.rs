@@ -29,6 +29,7 @@ pub struct ServerState {
     pub session_manager: SessionManager,
     pub tx: broadcast::Sender<Value>,
     pub command_queue: Arc<RwLock<HashMap<String, Vec<PendingCommand>>>>,
+    pub session_keys: Arc<RwLock<HashMap<String, String>>>,
 }
 
 pub async fn agent_ws_handler(

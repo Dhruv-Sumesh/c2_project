@@ -9,6 +9,7 @@ use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -23,6 +24,7 @@ mod sessions;
 mod auth;
 mod crypto;
 mod websocket;
+mod tls_util;
 
 use db::{Database, AgentMetrics, CommandResult};
 use registry::AgentRegistry;
@@ -39,6 +41,8 @@ struct EncryptedEnvelope {
 struct BeaconData {
     id: String,
     status: String,
+    #[serde(default)]
+    bootstrap: bool,
     hostname: Option<String>,
     os: Option<String>,
     cpu_usage: Option<f64>,
@@ -51,6 +55,8 @@ struct BeaconResponse {
     success: bool,
     timestamp: String,
     commands: Vec<PendingCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -106,7 +112,8 @@ async fn main() {
         registry,
         session_manager,
         tx: tx.clone(),
-        command_queue: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        command_queue: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        session_keys: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     };
 
     log_info(&db, &tx, "Server", None, "Starting Educational Multi-Agent C2 Server (HTTPS Beacon Mode)...");
@@ -114,7 +121,6 @@ async fn main() {
     let dash = dashboard_dir();
     log_info(&db, &tx, "Server", None, &format!("Serving dashboard from: {}", dash));
 
-    // Background task: mark stale agents offline (no beacon for 90s)
     let offline_db = db.clone();
     let offline_tx = tx.clone();
     tokio::spawn(async move {
@@ -167,27 +173,20 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let cert_dir = std::env::var("C2_CERT_DIR").unwrap_or_else(|_| "certs".to_string());
+    let (cert_path, key_path) = tls_util::ensure_certs(&cert_dir).expect("Failed to create TLS certificates");
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+        .await
+        .expect("Failed to load TLS config");
 
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!(
-                "Error: port 3000 is already in use.\n\
-                 Stop the existing server with: ./scripts/run-server.sh\n\
-                 Or manually: lsof -tiTCP:3000 -sTCP:LISTEN | xargs kill"
-            );
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: failed to bind to {}: {}", addr, e);
-            std::process::exit(1);
-        }
-    };
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3443));
+    log_info(&db, &tx, "Server", None, &format!("Server listening on https://{}", addr));
+    log_info(&db, &tx, "Server", None, "Beacon endpoint: POST https://localhost:3443/api/beacon (AES-GCM encrypted)");
 
-    log_info(&db, &tx, "Server", None, &format!("Server listening on http://{}", addr));
-    log_info(&db, &tx, "Server", None, "Beacon endpoint: POST /api/beacon (AES-GCM encrypted)");
-    axum::serve(listener, app).await.unwrap();
+    axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
 }
 
 async fn receive_beacon(
@@ -196,12 +195,9 @@ async fn receive_beacon(
     Json(envelope): Json<EncryptedEnvelope>,
 ) -> Result<Json<EncryptedEnvelope>, StatusCode> {
     let psk = auth::get_psk();
-    let plaintext = crypto::decrypt(&envelope.payload, &psk).map_err(|e| {
-        log_warn(&state.db, &state.tx, "Beacon", None, &format!("Decrypt failed: {}", e));
-        StatusCode::BAD_REQUEST
-    })?;
+    let psk_key = crypto::derive_key_from_psk(&psk);
 
-    let data: BeaconData = serde_json::from_slice(&plaintext).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (data, used_psk) = decrypt_beacon(&state, &headers, &envelope.payload, &psk_key).await?;
 
     let token = extract_bearer_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !auth::verify_agent_token(&data.id, &token) {
@@ -273,16 +269,74 @@ async fn receive_beacon(
         );
     }
 
+    let mut session_key_out: Option<String> = None;
+    if used_psk {
+        let new_key = crypto::generate_session_key_hex();
+        {
+            let mut keys = state.session_keys.write().await;
+            keys.insert(agent.id.clone(), new_key.clone());
+        }
+        session_key_out = Some(new_key);
+        log_info(
+            &state.db,
+            &state.tx,
+            "KeyExchange",
+            Some(agent.id.clone()),
+            "Session key established on first beacon",
+        );
+    }
+
     let response = BeaconResponse {
         success: true,
         timestamp: now,
         commands,
+        session_key: session_key_out,
+    };
+
+    let response_key = if used_psk {
+        psk_key
+    } else {
+        let keys = state.session_keys.read().await;
+        let hex_key = keys.get(&agent.id).ok_or(StatusCode::UNAUTHORIZED)?;
+        crypto::key_from_hex(hex_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
     let response_bytes = serde_json::to_vec(&response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let encrypted = crypto::encrypt(&response_bytes, &psk).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let encrypted = crypto::encrypt(&response_bytes, &response_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(EncryptedEnvelope { payload: encrypted }))
+}
+
+async fn decrypt_beacon(
+    state: &ServerState,
+    headers: &HeaderMap,
+    payload: &str,
+    psk_key: &[u8; 32],
+) -> Result<(BeaconData, bool), StatusCode> {
+    if let Ok(plaintext) = crypto::decrypt(payload, psk_key) {
+        if let Ok(data) = serde_json::from_slice::<BeaconData>(&plaintext) {
+            if data.bootstrap {
+                return Ok((data, true));
+            }
+        }
+    }
+
+    let agent_id = headers
+        .get("X-Agent-Id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let keys = state.session_keys.read().await;
+    let hex_key = keys.get(agent_id).ok_or(StatusCode::UNAUTHORIZED)?;
+    let session_key = crypto::key_from_hex(hex_key).map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let plaintext = crypto::decrypt(payload, &session_key).map_err(|e| {
+        log_warn(&state.db, &state.tx, "Beacon", None, &format!("Decrypt failed: {}", e));
+        StatusCode::BAD_REQUEST
+    })?;
+    let data: BeaconData = serde_json::from_slice(&plaintext).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    Ok((data, false))
 }
 
 async fn receive_result(
@@ -290,8 +344,17 @@ async fn receive_result(
     headers: HeaderMap,
     Json(envelope): Json<EncryptedEnvelope>,
 ) -> Result<Json<EncryptedEnvelope>, StatusCode> {
-    let psk = auth::get_psk();
-    let plaintext = crypto::decrypt(&envelope.payload, &psk).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let agent_id = headers
+        .get("X-Agent-Id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .to_string();
+
+    let keys = state.session_keys.read().await;
+    let hex_key = keys.get(&agent_id).ok_or(StatusCode::UNAUTHORIZED)?;
+    let session_key = crypto::key_from_hex(hex_key).map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let plaintext = crypto::decrypt(&envelope.payload, &session_key).map_err(|_| StatusCode::BAD_REQUEST)?;
     let data: CommandResultData = serde_json::from_slice(&plaintext).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let token = extract_bearer_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
@@ -337,7 +400,7 @@ async fn receive_result(
 
     let ack = serde_json::json!({ "success": true });
     let ack_bytes = serde_json::to_vec(&ack).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let encrypted = crypto::encrypt(&ack_bytes, &psk).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let encrypted = crypto::encrypt(&ack_bytes, &session_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(EncryptedEnvelope { payload: encrypted }))
 }

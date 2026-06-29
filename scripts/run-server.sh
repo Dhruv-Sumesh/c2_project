@@ -30,7 +30,7 @@ fi
 echo "Building server..."
 cargo build -p server --release
 
-echo "Starting C2 server on http://localhost:$PORT"
-echo "Beacon endpoint: POST http://localhost:$PORT/api/beacon (AES-GCM encrypted)"
-echo "Dashboard:       http://localhost:$PORT"
+echo "Starting C2 server on https://localhost:3443"
+echo "Beacon endpoint: POST https://localhost:3443/api/beacon (AES-GCM encrypted)"
+echo "Dashboard:       https://localhost:3443"
 exec cargo run -p server --release
