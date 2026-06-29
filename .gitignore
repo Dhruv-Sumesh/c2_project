@@ -1,0 +1,4 @@
+/target/
+/c2_simulator.db
+/agent_id.txt
+.DS_Store

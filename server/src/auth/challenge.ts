@@ -1,1 +1,0 @@
-// Challenge-response auth placeholder

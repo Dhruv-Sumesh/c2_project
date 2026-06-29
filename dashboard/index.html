@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Educational C2 Simulator Dashboard</title>
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Chart.js for real-time telemetry graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-icon"></div>
+                <div class="logo-text">
+                    <h2>C2 Simulator</h2>
+                    <span class="sub-text">PRO EDITION</span>
+                </div>
+            </div>
+            
+            <div class="server-status-card">
+                <div class="status-indicator">
+                    <span class="status-dot pulse-green"></span>
+                    <span class="status-label">SERVER ONLINE</span>
+                </div>
+                <div class="server-details">
+                    <p>PORT: <code>3000</code></p>
+                    <p>DB: <code>SQLite3</code></p>
+                </div>
+            </div>
+
+            <div class="sidebar-nav">
+                <h3>REGISTERED AGENTS</h3>
+                <ul id="agent-list" class="agent-list">
+                    <!-- Dynamic agent list -->
+                    <li class="loading-placeholder">Waiting for agents...</li>
+                </ul>
+            </div>
+        </aside>
+
+        <!-- Main Workspace -->
+        <main class="main-content">
+            <header class="top-header">
+                <div class="welcome-section">
+                    <h1 id="workspace-title">Global Overview</h1>
+                    <p id="workspace-subtitle" class="sub-text">Real-time status of all simulated operations</p>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-refresh" class="btn btn-secondary">Refresh Data</button>
+                </div>
+            </header>
+
+            <!-- Global / Overview Grid -->
+            <div id="overview-grid" class="dashboard-grid">
+                <div class="card stat-card">
+                    <div class="card-icon agent-icon"></div>
+                    <div class="stat-content">
+                        <h3>Total Agents</h3>
+                        <p id="stat-total-agents" class="stat-value">0</p>
+                    </div>
+                </div>
+                <div class="card stat-card">
+                    <div class="card-icon online-icon"></div>
+                    <div class="stat-content">
+                        <h3>Online Agents</h3>
+                        <p id="stat-online-agents" class="stat-value text-green">0</p>
+                    </div>
+                </div>
+                <div class="card stat-card">
+                    <div class="card-icon db-icon"></div>
+                    <div class="stat-content">
+                        <h3>Total Log Events</h3>
+                        <p id="stat-log-count" class="stat-value">0</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Agent Details Workspace (Hidden initially, shown when agent selected) -->
+            <div id="agent-workspace" class="agent-workspace hidden">
+                <div class="agent-profile-row">
+                    <div class="card agent-profile-card">
+                        <div class="profile-header">
+                            <div class="profile-avatar" id="agent-profile-avatar"></div>
+                            <div class="profile-main">
+                                <h2 id="agent-profile-hostname">hostname</h2>
+                                <p id="agent-profile-id" class="agent-id-badge">ID: ...</p>
+                            </div>
+                            <div class="profile-status">
+                                <span id="agent-profile-status-badge" class="badge">Offline</span>
+                            </div>
+                        </div>
+                        <div class="profile-details-grid">
+                            <div class="detail-item">
+                                <span class="detail-label">OPERATING SYSTEM</span>
+                                <span class="detail-value" id="agent-profile-os">Linux</span>
+                            </div>
+                            <div class="detail-item">
+                                <span class="detail-label">LAST SEEN</span>
+                                <span class="detail-value" id="agent-profile-last-seen">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Live Metrics Cards -->
+                    <div class="card metrics-card">
+                        <h3>Live Telemetry (Real-time)</h3>
+                        <div class="metrics-visuals">
+                            <div class="metric-progress-container">
+                                <div class="metric-info">
+                                    <span>CPU Usage</span>
+                                    <span id="txt-cpu-usage">0.0%</span>
+                                </div>
+                                <div class="progress-bar-bg">
+                                    <div id="progress-cpu" class="progress-bar-fill progress-cpu" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="metric-progress-container">
+                                <div class="metric-info">
+                                    <span>Memory Usage</span>
+                                    <span id="txt-mem-usage">0.0%</span>
+                                </div>
+                                <div class="progress-bar-bg">
+                                    <div id="progress-mem" class="progress-bar-fill progress-mem" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="metric-progress-container">
+                                <div class="metric-info">
+                                    <span>Disk Usage</span>
+                                    <span id="txt-disk-usage">0.0%</span>
+                                </div>
+                                <div class="progress-bar-bg">
+                                    <div id="progress-disk" class="progress-bar-fill progress-disk" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Performance Chart -->
+                <div class="card chart-card">
+                    <h3>Performance History</h3>
+                    <div class="chart-container">
+                        <canvas id="metricsChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Terminal / Logs section -->
+            <div class="card logs-card">
+                <div class="logs-card-header">
+                    <h3>Operation Console / Log Stream</h3>
+                    <div class="console-actions">
+                        <span class="pulse-indicator">
+                            <span class="status-dot pulse-indigo"></span>
+                            Live Streaming
+                        </span>
+                    </div>
+                </div>
+                <div class="terminal-container">
+                    <div class="terminal-body" id="log-terminal">
+                        <!-- Logs printed dynamically -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
