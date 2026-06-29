@@ -25,4 +25,5 @@ echo "Building server..."
 cargo build -p server --release
 
 echo "Starting C2 server on http://localhost:$PORT"
+echo "Beacon endpoint: POST http://localhost:$PORT/api/beacon"
 exec cargo run -p server --release

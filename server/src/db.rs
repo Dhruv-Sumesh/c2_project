@@ -1,7 +1,6 @@
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
-use chrono::{DateTime, Utc};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Agent {
@@ -40,6 +39,16 @@ pub struct LogItem {
     pub timestamp: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CommandResult {
+    pub id: Option<i64>,
+    pub command_id: String,
+    pub agent_id: String,
+    pub output: String,
+    pub status: String,
+    pub timestamp: String,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -57,6 +66,7 @@ impl Database {
 
     fn init_schema(&self) {
         let conn = self.conn.lock().unwrap();
+        
         conn.execute(
             "CREATE TABLE IF NOT EXISTS agents (
                 id TEXT PRIMARY KEY,
@@ -103,6 +113,19 @@ impl Database {
             )",
             [],
         ).expect("failed to create logs table");
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS command_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                output TEXT NOT NULL,
+                status TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY(agent_id) REFERENCES agents(id)
+            )",
+            [],
+        ).expect("failed to create command_results table");
     }
 
     pub fn upsert_agent(&self, agent: &Agent) -> Result<(), rusqlite::Error> {
@@ -200,7 +223,6 @@ impl Database {
         for metric in metric_iter {
             metrics.push(metric?);
         }
-        // Return in chronological order
         metrics.reverse();
         Ok(metrics)
     }
@@ -230,7 +252,6 @@ impl Database {
             "UPDATE sessions SET ended_at = ?1 WHERE ended_at IS NULL",
             params![ended_at],
         )?;
-        // Also mark all agents as offline on server startup (reboot)
         conn.execute(
             "UPDATE agents SET status = 'Offline'",
             [],
@@ -299,5 +320,48 @@ impl Database {
             logs.push(log?);
         }
         Ok(logs)
+    }
+
+    pub fn store_command_result(&self, result: &CommandResult) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO command_results (command_id, agent_id, output, status, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                result.command_id,
+                result.agent_id,
+                result.output,
+                result.status,
+                result.timestamp,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_command_results(&self, agent_id: &str, limit: usize) -> Result<Vec<CommandResult>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, command_id, agent_id, output, status, timestamp 
+             FROM command_results 
+             WHERE agent_id = ?1 
+             ORDER BY timestamp DESC 
+             LIMIT ?2"
+        )?;
+        let result_iter = stmt.query_map(params![agent_id, limit], |row| {
+            Ok(CommandResult {
+                id: Some(row.get(0)?),
+                command_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                output: row.get(3)?,
+                status: row.get(4)?,
+                timestamp: row.get(5)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for result in result_iter {
+            results.push(result?);
+        }
+        Ok(results)
     }
 }

