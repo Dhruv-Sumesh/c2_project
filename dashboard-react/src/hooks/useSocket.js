@@ -65,14 +65,16 @@ export function useSocket() {
   }, []);
 
   useEffect(() => {
+    // Use WSS when the page is served over HTTPS (production build on the C2 server).
     let wsUri = window.location.protocol === "https:" ? "wss:" : "ws:";
 
     if (window.location.port === "5173") {
-      wsUri = "ws://localhost:3000/api/dashboard/ws";
+      // Vite dev server proxies /api to https://localhost:3443
+      wsUri = "wss://localhost:3443/api/dashboard/ws";
     } else if (window.location.host) {
       wsUri += `//${window.location.host}/api/dashboard/ws`;
     } else {
-      wsUri = "ws://localhost:3000/api/dashboard/ws";
+      wsUri = "wss://localhost:3443/api/dashboard/ws";
     }
 
     const socket = new WebSocket(wsUri);
@@ -89,9 +91,9 @@ export function useSocket() {
       }
     };
 
-    // Poll agents/metrics as backup (beacon mode has 20-60s jitter)
+    // Poll agents as backup when WebSocket events are delayed (beacon polling).
     const apiBase = window.location.port === "5173"
-      ? "http://localhost:3000"
+      ? "https://localhost:3443"
       : window.location.origin;
 
     const poll = async () => {

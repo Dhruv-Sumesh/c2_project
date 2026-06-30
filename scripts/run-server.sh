@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PORT=3000
+PORT=3443
 
 if pids=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); then
   echo "Stopping existing server on port $PORT (PID: ${pids//$'\n'/ })..."
