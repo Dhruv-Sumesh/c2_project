@@ -7,6 +7,8 @@ export function useSocket() {
   const [metricsHistory, setMetricsHistory] = useState(new Map());
   const [commandResults, setCommandResults] = useState(new Map());
   const [payloadUploads, setPayloadUploads] = useState([]);
+  const [buildEvents, setBuildEvents] = useState([]);
+  const [transferEvents, setTransferEvents] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
 
   const handleMessage = useCallback((msg) => {
@@ -81,6 +83,39 @@ export function useSocket() {
         });
         break;
 
+      case "BuildStatus":
+        setBuildEvents(prev => [payload, ...prev.filter(e => e.id !== payload.id)]);
+        break;
+
+      case "FileTransferProgress":
+      case "FileTransferComplete":
+        setTransferEvents(prev => [payload, ...prev.slice(0, 49)]);
+        break;
+
+      case "BroadcastSent":
+        setLogs(prev => [...prev, {
+          level: "INFO",
+          source: "Broadcast",
+          agent_id: null,
+          message: `Broadcast sent to ${payload.agent_count} agents: ${payload.command}`,
+          timestamp: new Date().toISOString(),
+        }]);
+        break;
+
+      case "AgentStatusChanged":
+        setAgents(prev => {
+          const newMap = new Map(prev);
+          const existing = newMap.get(payload.agent_id);
+          if (existing) {
+            newMap.set(payload.agent_id, {
+              ...existing,
+              status: payload.new_status,
+            });
+          }
+          return newMap;
+        });
+        break;
+
       default:
         break;
     }
@@ -141,5 +176,5 @@ export function useSocket() {
     };
   }, [handleMessage]);
 
-  return { agents, logs, metricsHistory, commandResults, payloadUploads, isConnected };
+  return { agents, logs, metricsHistory, commandResults, payloadUploads, buildEvents, transferEvents, isConnected };
 }

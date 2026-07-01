@@ -5,7 +5,7 @@ use std::env;
 type HmacSha256 = Hmac<Sha256>;
 
 pub fn get_psk() -> String {
-    env::var("C2_PSK").unwrap_or_else(|_| "educational-c2-psk-key".to_string())
+    env::var("C2_PSK").unwrap_or_else(|_| crate::config::embedded_psk().to_string())
 }
 
 /// HMAC-based bearer token derived from agent ID and shared PSK.

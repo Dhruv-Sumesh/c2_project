@@ -1,5 +1,6 @@
 import React from 'react';
-import { Bot, ChevronRight, Circle } from 'lucide-react';
+import { Bot, ChevronRight } from 'lucide-react';
+import { StatusIndicator } from '../StatusIndicator';
 
 /** Clickable agent list — opens the CLI side panel for the selected agent */
 export function AgentSelector({ agents, selectedAgentId, onSelectAgent }) {
@@ -13,6 +14,7 @@ export function AgentSelector({ agents, selectedAgentId, onSelectAgent }) {
       <ul className="space-y-1.5">
         {agents.map((agent) => {
           const isSelected = selectedAgentId === agent.id;
+          const status = agent.status ?? (agent.online ? 'Online' : 'Offline');
           return (
             <li key={agent.id}>
               <button
@@ -25,18 +27,13 @@ export function AgentSelector({ agents, selectedAgentId, onSelectAgent }) {
                     : 'border-transparent bg-slate-800/30 hover:border-slate-600 hover:bg-slate-800/60',
                 ].join(' ')}
               >
-                <Circle
-                  className={[
-                    'h-2 w-2 shrink-0 fill-current',
-                    agent.online ? 'text-emerald-400' : 'text-slate-600',
-                  ].join(' ')}
-                />
+                <StatusIndicator status={status} lastSeen={agent.last_seen} showLabel={false} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-slate-200">
                     {agent.hostname}
                   </p>
                   <p className="truncate text-[10px] text-slate-500">
-                    {agent.id.slice(0, 16)}…
+                    {agent.id.slice(0, 16)}… &middot; {agent.os}
                   </p>
                 </div>
                 <ChevronRight
