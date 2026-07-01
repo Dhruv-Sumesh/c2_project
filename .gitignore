@@ -3,4 +3,7 @@
 /agent_id.txt
 /session_key.txt
 /certs/
+/payloads/
+/dashboard-react/node_modules/
+/dashboard-react/dist/
 .DS_Store

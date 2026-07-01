@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
+import { getApiBase, getWsUrl } from '../api/c2Api';
 
 export function useSocket() {
   const [agents, setAgents] = useState(new Map());
   const [logs, setLogs] = useState([]);
   const [metricsHistory, setMetricsHistory] = useState(new Map());
+  const [commandResults, setCommandResults] = useState(new Map());
+  const [payloadUploads, setPayloadUploads] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
 
   const handleMessage = useCallback((msg) => {
@@ -50,6 +53,11 @@ export function useSocket() {
         break;
 
       case "CommandResult":
+        setCommandResults(prev => {
+          const next = new Map(prev);
+          next.set(payload.command_id, payload);
+          return next;
+        });
         setLogs(prev => [...prev, {
           level: "INFO",
           source: "Result",
@@ -59,22 +67,27 @@ export function useSocket() {
         }]);
         break;
 
+      case "PayloadUpload":
+        setPayloadUploads(prev => {
+          const session = {
+            id: payload.id,
+            fileName: payload.file_name,
+            fileSize: payload.file_size,
+            status: payload.status,
+            uploadedAt: payload.uploaded_at,
+          };
+          const filtered = prev.filter(s => s.id !== session.id);
+          return [session, ...filtered];
+        });
+        break;
+
       default:
         break;
     }
   }, []);
 
   useEffect(() => {
-    let wsUri = window.location.protocol === "https:" ? "wss:" : "ws:";
-
-    if (window.location.port === "5173") {
-      wsUri = "ws://localhost:3000/api/dashboard/ws";
-    } else if (window.location.host) {
-      wsUri += `//${window.location.host}/api/dashboard/ws`;
-    } else {
-      wsUri = "ws://localhost:3000/api/dashboard/ws";
-    }
-
+    const wsUri = getWsUrl();
     const socket = new WebSocket(wsUri);
 
     socket.onopen = () => setIsConnected(true);
@@ -89,10 +102,7 @@ export function useSocket() {
       }
     };
 
-    // Poll agents/metrics as backup (beacon mode has 20-60s jitter)
-    const apiBase = window.location.port === "5173"
-      ? "http://localhost:3000"
-      : window.location.origin;
+    const apiBase = getApiBase();
 
     const poll = async () => {
       try {
@@ -117,5 +127,5 @@ export function useSocket() {
     };
   }, [handleMessage]);
 
-  return { agents, logs, metricsHistory, isConnected };
+  return { agents, logs, metricsHistory, commandResults, payloadUploads, isConnected };
 }
