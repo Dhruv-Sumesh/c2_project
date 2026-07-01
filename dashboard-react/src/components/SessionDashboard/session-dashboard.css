@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* Scoped typography for the session dashboard (does not override global app styles) */
+.session-dashboard {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.session-dashboard .font-terminal {
+  font-family: "JetBrains Mono", "Courier New", ui-monospace, monospace;
+}

@@ -73,6 +73,15 @@ pub struct CommandResult {
     pub timestamp: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PayloadUpload {
+    pub id: String,
+    pub file_name: String,
+    pub file_size: i64,
+    pub status: String,
+    pub uploaded_at: String,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -157,6 +166,18 @@ impl Database {
             )",
             [],
         ).expect("failed to create command_results table");
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS payload_uploads (
+                id TEXT PRIMARY KEY,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                storage_path TEXT NOT NULL
+            )",
+            [],
+        ).expect("failed to create payload_uploads table");
     }
 
     pub fn upsert_agent(&self, agent: &Agent) -> Result<(), rusqlite::Error> {
@@ -410,5 +431,60 @@ impl Database {
             results.push(result?);
         }
         Ok(results)
+    }
+
+    pub fn insert_payload_upload(
+        &self,
+        upload: &PayloadUpload,
+        storage_path: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO payload_uploads (id, file_name, file_size, status, uploaded_at, storage_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                upload.id,
+                upload.file_name,
+                upload.file_size,
+                upload.status,
+                upload.uploaded_at,
+                storage_path,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_payload_uploads(&self, limit: usize) -> Result<Vec<PayloadUpload>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, file_name, file_size, status, uploaded_at
+             FROM payload_uploads
+             ORDER BY uploaded_at DESC
+             LIMIT ?1",
+        )?;
+        let iter = stmt.query_map(params![limit], |row| {
+            Ok(PayloadUpload {
+                id: row.get(0)?,
+                file_name: row.get(1)?,
+                file_size: row.get(2)?,
+                status: row.get(3)?,
+                uploaded_at: row.get(4)?,
+            })
+        })?;
+
+        let mut uploads = Vec::new();
+        for upload in iter {
+            uploads.push(upload?);
+        }
+        Ok(uploads)
+    }
+
+    pub fn update_payload_status(&self, id: &str, status: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE payload_uploads SET status = ?1 WHERE id = ?2",
+            params![status, id],
+        )?;
+        Ok(())
     }
 }

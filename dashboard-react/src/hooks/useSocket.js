@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
+import { getApiBase, getWsUrl } from '../api/c2Api';
 
 export function useSocket() {
   const [agents, setAgents] = useState(new Map());
   const [logs, setLogs] = useState([]);
   const [metricsHistory, setMetricsHistory] = useState(new Map());
+  const [commandResults, setCommandResults] = useState(new Map());
+  const [payloadUploads, setPayloadUploads] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
 
   const handleMessage = useCallback((msg) => {
@@ -50,6 +53,11 @@ export function useSocket() {
         break;
 
       case "CommandResult":
+        setCommandResults(prev => {
+          const next = new Map(prev);
+          next.set(payload.command_id, payload);
+          return next;
+        });
         setLogs(prev => [...prev, {
           level: "INFO",
           source: "Result",
@@ -57,6 +65,20 @@ export function useSocket() {
           message: `Command ${payload.command_id.substring(0, 8)} ${payload.status}`,
           timestamp: payload.timestamp,
         }]);
+        break;
+
+      case "PayloadUpload":
+        setPayloadUploads(prev => {
+          const session = {
+            id: payload.id,
+            fileName: payload.file_name,
+            fileSize: payload.file_size,
+            status: payload.status,
+            uploadedAt: payload.uploaded_at,
+          };
+          const filtered = prev.filter(s => s.id !== session.id);
+          return [session, ...filtered];
+        });
         break;
 
       default:
@@ -119,5 +141,5 @@ export function useSocket() {
     };
   }, [handleMessage]);
 
-  return { agents, logs, metricsHistory, isConnected };
+  return { agents, logs, metricsHistory, commandResults, payloadUploads, isConnected };
 }

