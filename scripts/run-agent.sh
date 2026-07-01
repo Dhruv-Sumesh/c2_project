@@ -11,5 +11,5 @@ echo "Building agent..."
 cargo build -p agent --release
 
 echo "Starting agent with HTTPS encrypted beacon to ${C2_SERVER_URL}"
-echo "Agent ID: agent_id.txt | Session key: session_key.txt"
+echo "Agent ID: agent_id.txt | Session key: in-memory only"
 exec cargo run -p agent --release

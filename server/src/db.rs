@@ -2,6 +2,13 @@ use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
 
+/// Default beacon polling interval in seconds (server-wide fallback).
+pub const DEFAULT_BEACON_INTERVAL_SECS: u64 = 30;
+/// Minimum allowed beacon interval enforced on server and agent.
+pub const MIN_BEACON_INTERVAL_SECS: u64 = 5;
+/// Maximum allowed beacon interval enforced on server and agent.
+pub const MAX_BEACON_INTERVAL_SECS: u64 = 3600;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Agent {
     pub id: String,
@@ -9,6 +16,23 @@ pub struct Agent {
     pub os: String,
     pub status: String,
     pub last_seen: String,
+    #[serde(default = "default_beacon_interval")]
+    pub beacon_interval_secs: u64,
+}
+
+fn default_beacon_interval() -> u64 {
+    DEFAULT_BEACON_INTERVAL_SECS
+}
+
+/// Clamp and validate a requested beacon interval.
+pub fn validate_beacon_interval(secs: u64) -> Result<u64, String> {
+    if secs < MIN_BEACON_INTERVAL_SECS || secs > MAX_BEACON_INTERVAL_SECS {
+        return Err(format!(
+            "interval must be between {} and {} seconds",
+            MIN_BEACON_INTERVAL_SECS, MAX_BEACON_INTERVAL_SECS
+        ));
+    }
+    Ok(secs)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -82,10 +106,17 @@ impl Database {
                 hostname TEXT NOT NULL,
                 os TEXT NOT NULL,
                 status TEXT NOT NULL,
-                last_seen TEXT NOT NULL
+                last_seen TEXT NOT NULL,
+                beacon_interval_secs INTEGER NOT NULL DEFAULT 30
             )",
             [],
         ).expect("failed to create agents table");
+
+        // Migrate older databases that lack the interval column.
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN beacon_interval_secs INTEGER NOT NULL DEFAULT 30",
+            [],
+        );
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS agent_metrics (
@@ -152,16 +183,46 @@ impl Database {
     pub fn upsert_agent(&self, agent: &Agent) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO agents (id, hostname, os, status, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO agents (id, hostname, os, status, last_seen, beacon_interval_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
                 hostname = excluded.hostname,
                 os = excluded.os,
                 status = excluded.status,
-                last_seen = excluded.last_seen",
-            params![agent.id, agent.hostname, agent.os, agent.status, agent.last_seen],
+                last_seen = excluded.last_seen,
+                beacon_interval_secs = excluded.beacon_interval_secs",
+            params![
+                agent.id,
+                agent.hostname,
+                agent.os,
+                agent.status,
+                agent.last_seen,
+                agent.beacon_interval_secs,
+            ],
         )?;
         Ok(())
+    }
+
+    pub fn update_beacon_interval(&self, agent_id: &str, interval_secs: u64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agents SET beacon_interval_secs = ?1 WHERE id = ?2",
+            params![interval_secs, agent_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_beacon_interval(&self, agent_id: &str) -> Result<u64, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT beacon_interval_secs FROM agents WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![agent_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(DEFAULT_BEACON_INTERVAL_SECS)
+        }
     }
 
     pub fn update_agent_status(&self, agent_id: &str, status: &str, last_seen: &str) -> Result<(), rusqlite::Error> {
@@ -175,7 +236,9 @@ impl Database {
 
     pub fn get_agents(&self) -> Result<Vec<Agent>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, hostname, os, status, last_seen FROM agents ORDER BY last_seen DESC")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, hostname, os, status, last_seen, beacon_interval_secs FROM agents ORDER BY last_seen DESC",
+        )?;
         let agent_iter = stmt.query_map([], |row| {
             Ok(Agent {
                 id: row.get(0)?,
@@ -183,6 +246,7 @@ impl Database {
                 os: row.get(2)?,
                 status: row.get(3)?,
                 last_seen: row.get(4)?,
+                beacon_interval_secs: row.get(5)?,
             })
         })?;
 
@@ -191,23 +255,6 @@ impl Database {
             agents.push(agent?);
         }
         Ok(agents)
-    }
-
-    pub fn get_agent(&self, id: &str) -> Result<Option<Agent>, rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, hostname, os, status, last_seen FROM agents WHERE id = ?1")?;
-        let mut rows = stmt.query(params![id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(Agent {
-                id: row.get(0)?,
-                hostname: row.get(1)?,
-                os: row.get(2)?,
-                status: row.get(3)?,
-                last_seen: row.get(4)?,
-            }))
-        } else {
-            Ok(None)
-        }
     }
 
     pub fn insert_metrics(&self, metrics: &AgentMetrics) -> Result<(), rusqlite::Error> {

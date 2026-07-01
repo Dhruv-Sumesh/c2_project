@@ -1,6 +1,5 @@
-Agent -> Server : REGISTER
-Server -> Agent : CHALLENGE
-Agent -> Server : PROOF
-Server -> Agent : AUTH_OK
-Agent -> Server : HEARTBEAT
-Agent -> Server : SYSTEM_INFO
+Agent -> Server : REGISTER (HTTPS POST /api/beacon, PSK encrypted, bootstrap=true)
+Server -> Agent : SESSION_KEY + SLEEP_INTERVAL (PSK encrypted response)
+Agent -> Server : BEACON (session key encrypted)
+Server -> Agent : COMMANDS + SLEEP_INTERVAL (session key encrypted)
+Agent -> Server : RESULT (session key encrypted)
