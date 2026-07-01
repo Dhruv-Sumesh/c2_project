@@ -25,6 +25,7 @@ mod crypto;
 mod websocket;
 mod tls_util;
 
+use crate::db::PayloadUpload;
 use db::{Database, AgentMetrics, CommandResult, validate_beacon_interval, DEFAULT_BEACON_INTERVAL_SECS};
 use sessions::SessionManager;
 use websocket::{ServerState, dashboard_ws_handler, PendingCommand};

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-export C2_SERVER_URL="${C2_SERVER_URL:-https://localhost:3443}"
+export C2_SERVER_URL="https://192.168.64.9:3443"
 export C2_PSK="${C2_PSK:-educational-c2-psk-key}"
 
 echo "Building agent..."
