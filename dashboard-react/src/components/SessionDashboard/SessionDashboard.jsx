@@ -11,15 +11,6 @@ import { StatusSummary } from '../StatusIndicator';
 import { fetchPayloadSessions } from '../../api/c2Api';
 import './session-dashboard.css';
 
-/**
- * Session Dashboard wired to the C2 Rust server (server/src/main.rs).
- *
- * @param {Object} props
- * @param {Array} props.agents - Live agents from useSocket
- * @param {Map} props.commandResults - CommandResult events keyed by command_id
- * @param {Array} [props.payloadUploads] - Live payload uploads from WebSocket
- * @param {boolean} props.isConnected - Dashboard WebSocket status
- */
 export function SessionDashboard({
   agents = [],
   commandResults,
@@ -36,14 +27,12 @@ export function SessionDashboard({
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
 
-  // Load persisted upload sessions from C2 server
   useEffect(() => {
     fetchPayloadSessions()
       .then(setUploadSessions)
       .catch(() => setUploadSessions([]));
   }, []);
 
-  // Merge WebSocket payload upload events
   useEffect(() => {
     if (!payloadUploads.length) return;
     setUploadSessions((prev) => {
@@ -53,9 +42,7 @@ export function SessionDashboard({
           merged.push(session);
         }
       }
-      return merged.sort(
-        (a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt),
-      );
+      return merged.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
     });
   }, [payloadUploads]);
 
@@ -66,15 +53,18 @@ export function SessionDashboard({
     });
   }, []);
 
-  const handleSelectAgent = useCallback((id) => {
-    if (selectedAgentId === id && isPanelOpen) {
-      setIsPanelOpen(false);
-      setSelectedAgentId(null);
-      return;
-    }
-    setSelectedAgentId(id);
-    setIsPanelOpen(true);
-  }, [selectedAgentId, isPanelOpen]);
+  const handleSelectAgent = useCallback(
+    (id) => {
+      if (selectedAgentId === id && isPanelOpen) {
+        setIsPanelOpen(false);
+        setSelectedAgentId(null);
+        return;
+      }
+      setSelectedAgentId(id);
+      setIsPanelOpen(true);
+    },
+    [selectedAgentId, isPanelOpen],
+  );
 
   const handleClosePanel = useCallback(() => {
     setIsPanelOpen(false);
@@ -105,11 +95,7 @@ export function SessionDashboard({
                   : 'bg-red-500/10 text-red-300 ring-red-500/30',
               ].join(' ')}
             >
-              {isConnected ? (
-                <Wifi className="h-3 w-3" />
-              ) : (
-                <WifiOff className="h-3 w-3" />
-              )}
+              {isConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
               {isConnected ? 'C2 connected' : 'C2 offline'}
             </div>
           </div>

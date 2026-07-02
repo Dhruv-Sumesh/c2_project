@@ -1,0 +1,6 @@
+[build.env]
+passthrough = [
+    "C2_BUILD_SERVER_URL",
+    "C2_BUILD_PSK",
+    "C2_BUILD_BEACON_INTERVAL",
+]
