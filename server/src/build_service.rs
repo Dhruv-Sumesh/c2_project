@@ -56,13 +56,7 @@ pub fn resolve_target(target_os: &str) -> Result<TargetInfo, String> {
 }
 
 fn workspace_root() -> PathBuf {
-    if Path::new("./Cargo.toml").exists() {
-        PathBuf::from(".")
-    } else if Path::new("../Cargo.toml").exists() {
-        PathBuf::from("..")
-    } else {
-        PathBuf::from(".")
-    }
+    PathBuf::from("..")
 }
 
 /// Start an async agent build and return immediately with build_id.
@@ -70,6 +64,9 @@ pub async fn start_build(
     state: &ServerState,
     req: BuildRequest,
 ) -> Result<BuildResponse, String> {
+println!("========== start_build CALLED ==========");
+println!("Target OS: {}", req.target_os);
+
     if req.server_url.trim().is_empty() {
         return Err("server_url is required".to_string());
     }
@@ -168,7 +165,10 @@ async fn run_build(
     target: String,
     extension: String,
 ) {
+println!("========== run_build CALLED ==========");
     let root = workspace_root();
+     println!("workspace root = {:?}", root);
+     println!("current dir = {:?}", std::env::current_dir().unwrap());
     let output_name = format!("agent_{}{}", build_id, extension);
     let output_path = format!("{}/{}", BUILDS_DIR, output_name);
 
@@ -202,6 +202,20 @@ async fn run_build(
     };
 
     let result = cmd.output().await;
+match &result {
+    Ok(output) => {
+        println!("==================================");
+        println!("Cargo exit status: {:?}", output.status);
+        println!("STDOUT:");
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        println!("STDERR:");
+        println!("{}", String::from_utf8_lossy(&output.stderr));
+        println!("==================================");
+    }
+    Err(e) => {
+        println!("Failed to execute cargo: {}", e);
+    }
+}
 
     match result {
         Ok(output) if output.status.success() => {
@@ -218,18 +232,46 @@ async fn run_build(
                     })
             } else {
                 let base = root.join(format!("target/{}/release/agent", target));
-                let with_exe = base.with_extension("exe");
-                if with_exe.exists() {
-                    Some(with_exe)
-                } else if base.exists() {
-                    Some(base)
-                } else {
-                    None
-                }
-            };
+let with_exe = base.with_extension("exe");
+
+println!("==============================");
+println!("Workspace root : {:?}", root);
+println!("Base path      : {:?}", base);
+println!("EXE path       : {:?}", with_exe);
+println!("Base exists    : {}", base.exists());
+println!("EXE exists     : {}", with_exe.exists());
+
+let release_dir = root.join(format!("target/{}/release", target));
+println!("Release dir    : {:?}", release_dir);
+
+match std::fs::read_dir(&release_dir) {
+    Ok(entries) => {
+        println!("Files in release directory:");
+        for entry in entries {
+            println!("  {:?}", entry.unwrap().path());
+        }
+    }
+    Err(e) => {
+        println!("Could not open release directory: {}", e);
+    }
+}
+
+println!("==============================");
+
+if with_exe.exists() {
+    Some(with_exe)
+} else if base.exists() {
+    Some(base)
+} else {
+    None
+}
+ };
 
             match src {
                 Some(src_path) => {
+println!("Source binary = {:?}", src_path);
+println!("Binary exists = {}", src_path.exists());
+println!("Destination = {}", output_path);
                     if let Err(e) = tokio::fs::copy(&src_path, &output_path).await {
                         fail_build(&state, &build_id, &format!("Copy failed: {}", e)).await;
                         return;
