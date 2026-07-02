@@ -89,10 +89,10 @@ fn is_native_build(target_os: &str) -> bool {
     let requested = target_os.to_lowercase();
     match requested.as_str() {
         "binary" => true, // always native
-        "linux" => host == "linux" && cfg!(target_arch = "x86_64"),
-        "linux-arm64" => host == "linux" && cfg!(target_arch = "aarch64"),
-        "linux-arm32" => host == "linux" && cfg!(target_arch = "arm"),
-        "windows" => host == "windows",
+        "linux" => host == "linux",
+        "linux-arm64" => host == "linux",
+        "linux-arm32" => host == "linux",
+        "windows" => host == "linux" || host == "windows",
         "macos" => host == "macos",
         _ => false,
     }
@@ -403,15 +403,27 @@ async fn run_build(
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let msg = if stderr.len() > 500 {
+            let base_msg = if stderr.len() > 500 {
                 format!("{}...", &stderr[..500])
             } else {
                 stderr.to_string()
             };
+            let is_arm_host = cfg!(target_arch = "aarch64") || cfg!(target_arch = "arm");
+            let msg = if use_cross && is_arm_host {
+                format!("{}\n\n[!] Note: You are running on an ARM host. Cross-compiling to non-native targets (like Windows or x86_64 Linux) via Docker relies on QEMU user-mode emulation, which can be unstable and segment fault. Try compiling the 'Linux ARM64 / Kali ARM' target, which builds natively without emulation.", base_msg)
+            } else {
+                base_msg
+            };
             fail_build(&state, &build_id, &msg).await;
         }
         Err(e) => {
-            fail_build(&state, &build_id, &format!("Build process error: {}", e)).await;
+            let is_arm_host = cfg!(target_arch = "aarch64") || cfg!(target_arch = "arm");
+            let msg = if use_cross && is_arm_host {
+                format!("Build process error: {}\n\n[!] Note: You are running on an ARM host. Cross-compiling to non-native targets via Docker relies on QEMU emulation. Try compiling the 'Linux ARM64 / Kali ARM' target, which builds natively.", e)
+            } else {
+                format!("Build process error: {}", e)
+            };
+            fail_build(&state, &build_id, &msg).await;
         }
     }
 }
@@ -419,7 +431,7 @@ async fn run_build(
 async fn fail_build(state: &ServerState, build_id: &str, reason: &str) {
     let _ = state
         .db
-        .update_agent_build_status(build_id, "failed", None);
+        .update_agent_build_status(build_id, "failed", Some(reason));
     log_warn(
         &state.db,
         &state.tx,
@@ -442,6 +454,7 @@ pub fn list_builds(db: &Database) -> Result<Vec<Value>, String> {
     Ok(builds
         .into_iter()
         .map(|b| {
+            let error_msg = if b.status == "failed" { Some(b.file_path.clone()) } else { None };
             serde_json::json!({
                 "id": b.id,
                 "target_os": b.target_os,
@@ -450,6 +463,7 @@ pub fn list_builds(db: &Database) -> Result<Vec<Value>, String> {
                 "status": b.status,
                 "created_at": b.created_at,
                 "download_url": format!("/api/agents/download/{}", b.id),
+                "error": error_msg,
             })
         })
         .collect())

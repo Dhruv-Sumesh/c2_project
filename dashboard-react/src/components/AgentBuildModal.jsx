@@ -45,6 +45,11 @@ export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
       setActiveBuildId(latest.id);
       if (latest.status === 'completed' || latest.status === 'failed') {
         setBuilding(false);
+        if (latest.status === 'failed') {
+          setError(latest.error || 'Build failed');
+        } else {
+          setError('');
+        }
         loadBuilds();
       }
     }
@@ -193,19 +198,26 @@ export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
               {builds.map((b) => (
                 <li
                   key={b.id}
-                  className="flex items-center justify-between rounded-lg bg-slate-800/50 px-3 py-2 text-[11px]"
+                  className="flex flex-col gap-1 rounded-lg bg-slate-800/50 px-3 py-2 text-[11px]"
                 >
-                  <div>
-                    <span className="font-medium text-slate-300">{b.target_os}</span>
-                    <span className="ml-2 text-slate-500">{b.status}</span>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="font-medium text-slate-300">{b.target_os}</span>
+                      <span className="ml-2 text-slate-500">{b.status}</span>
+                    </div>
+                    {b.status === 'completed' && (
+                      <a
+                        href={getAgentDownloadUrl(b.id)}
+                        className="text-emerald-400 hover:underline"
+                      >
+                        Download
+                      </a>
+                    )}
                   </div>
-                  {b.status === 'completed' && (
-                    <a
-                      href={getAgentDownloadUrl(b.id)}
-                      className="text-emerald-400 hover:underline"
-                    >
-                      Download
-                    </a>
+                  {b.error && (
+                    <div className="mt-1 max-h-24 overflow-y-auto rounded bg-red-950/40 p-1.5 font-mono text-[9px] text-red-300 border border-red-900/30 whitespace-pre-wrap">
+                      {b.error}
+                    </div>
                   )}
                 </li>
               ))}
