@@ -66,6 +66,14 @@ rustup target add x86_64-unknown-linux-musl 2>/dev/null && \
     info "Target added: x86_64-unknown-linux-musl (Linux, static)" || \
     warn "Target x86_64-unknown-linux-musl may already be installed"
 
+rustup target add aarch64-unknown-linux-musl 2>/dev/null && \
+    info "Target added: aarch64-unknown-linux-musl (Linux ARM64, static)" || \
+    warn "Target aarch64-unknown-linux-musl may already be installed"
+
+rustup target add armv7-unknown-linux-musleabihf 2>/dev/null && \
+    info "Target added: armv7-unknown-linux-musleabihf (Linux ARM32, static)" || \
+    warn "Target armv7-unknown-linux-musleabihf may already be installed"
+
 # ── Install cross ──────────────────────────────────────────────────────────
 echo ""
 if command -v cross &>/dev/null; then
@@ -96,15 +104,25 @@ docker pull ghcr.io/cross-rs/x86_64-unknown-linux-musl:main 2>/dev/null && \
     info "Pulled Linux (musl) cross-compilation image" || \
     warn "Could not pre-pull Linux image (will be pulled on first build)"
 
+docker pull ghcr.io/cross-rs/aarch64-unknown-linux-musl:main 2>/dev/null && \
+    info "Pulled Linux ARM64 (musl) cross-compilation image" || \
+    warn "Could not pre-pull Linux ARM64 image (will be pulled on first build)"
+
+docker pull ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main 2>/dev/null && \
+    info "Pulled Linux ARM32 (musl) cross-compilation image" || \
+    warn "Could not pre-pull Linux ARM32 image (will be pulled on first build)"
+
 # ── Done ────────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 info "Setup complete! Cross-compilation is ready."
 echo ""
 echo "  Supported build targets:"
-echo "    • windows  → x86_64-pc-windows-gnu    (via cross + Docker)"
-echo "    • linux    → x86_64-unknown-linux-musl (via cross + Docker, or native cargo on Linux)"
-echo "    • binary   → native host binary        (plain cargo, no Docker needed)"
+echo "    • windows      → x86_64-pc-windows-gnu      (via cross + Docker)"
+echo "    • linux        → x86_64-unknown-linux-musl  (via cross + Docker, or native cargo on Linux)"
+echo "    • linux-arm64  → aarch64-unknown-linux-musl (via cross + Docker, or native cargo on ARM64 Linux)"
+echo "    • linux-arm32  → armv7-unknown-linux-musleabihf (via cross + Docker, or native cargo on ARM32 Linux)"
+echo "    • binary       → native host binary          (plain cargo, no Docker needed)"
 echo ""
 echo "  Start the server:  ./scripts/run-server.sh"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

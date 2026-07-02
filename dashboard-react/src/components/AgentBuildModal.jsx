@@ -100,7 +100,9 @@ export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
               className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
             >
               <option value="windows">Windows (.exe)</option>
-              <option value="linux">Linux (ELF)</option>
+              <option value="linux">Linux x86_64 (ELF)</option>
+              <option value="linux-arm64">Linux ARM64 / Kali ARM (ELF)</option>
+              <option value="linux-arm32">Linux ARM32 / RPi (ELF)</option>
               <option value="binary">Native Binary (.bin)</option>
             </select>
           </label>

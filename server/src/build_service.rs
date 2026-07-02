@@ -65,6 +65,14 @@ pub fn resolve_target(target_os: &str) -> Result<TargetInfo, String> {
             target: "x86_64-unknown-linux-musl",
             extension: "",
         }),
+        "linux-arm64" => Ok(TargetInfo {
+            target: "aarch64-unknown-linux-musl",
+            extension: "",
+        }),
+        "linux-arm32" => Ok(TargetInfo {
+            target: "armv7-unknown-linux-musleabihf",
+            extension: "",
+        }),
         // Bare-metal (unknown-none) requires no_std; use native host target for educational labs.
         "binary" => Ok(TargetInfo {
             target: "native",
@@ -81,7 +89,9 @@ fn is_native_build(target_os: &str) -> bool {
     let requested = target_os.to_lowercase();
     match requested.as_str() {
         "binary" => true, // always native
-        "linux" => host == "linux",
+        "linux" => host == "linux" && cfg!(target_arch = "x86_64"),
+        "linux-arm64" => host == "linux" && cfg!(target_arch = "aarch64"),
+        "linux-arm32" => host == "linux" && cfg!(target_arch = "arm"),
         "windows" => host == "windows",
         "macos" => host == "macos",
         _ => false,
