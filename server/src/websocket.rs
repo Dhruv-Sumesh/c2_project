@@ -27,7 +27,6 @@ pub struct ServerState {
     pub session_keys: Arc<RwLock<HashMap<String, String>>>,
 }
 
-/// Dashboard WebSocket: streams live agent status, metrics, and log events.
 pub async fn dashboard_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
@@ -70,9 +69,7 @@ async fn handle_dashboard_ws(socket: WebSocket, state: ServerState) {
     });
 
     let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(_)) = ws_receiver.next().await {
-            // Dashboard is receive-only for live events.
-        }
+        while let Some(Ok(_)) = ws_receiver.next().await {}
     });
 
     tokio::select! {

@@ -33,16 +33,13 @@ fn write_log(
         timestamp: timestamp.clone(),
     };
 
-    // Print to stdout
     let formatted_agent = agent_id.as_ref().map(|id| format!(" [Agent: {}]", id)).unwrap_or_default();
     println!("[{}]{} [{}] {}: {}", timestamp, formatted_agent, level, source, message);
 
-    // Insert to database
     if let Err(e) = db.insert_log(&log_item) {
         eprintln!("Failed to write log to database: {:?}", e);
     }
 
-    // Broadcast to dashboards
     let event = json!({
         "type": "Log",
         "payload": log_item

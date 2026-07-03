@@ -7,7 +7,7 @@ use crate::db::{Database, Session};
 #[derive(Clone)]
 pub struct SessionManager {
     db: Database,
-    active_sessions: Arc<Mutex<HashMap<String, String>>>, // Agent ID -> Session ID
+    active_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl SessionManager {

@@ -182,7 +182,6 @@ async fn main() {
                     }
                     if let Ok(last) = chrono::DateTime::parse_from_rfc3339(&agent.last_seen) {
                         let elapsed = now.signed_duration_since(last).num_seconds();
-                        // Mark offline after 3 missed beacons based on configured interval.
                         let timeout = (agent.beacon_interval_secs * 3).max(90) as i64;
                         if elapsed > timeout {
                             let ts = now.to_rfc3339();
@@ -260,7 +259,6 @@ async fn receive_beacon(
     Json(envelope): Json<EncryptedEnvelope>,
 ) -> Result<Json<EncryptedEnvelope>, StatusCode> {
     let psk = auth::get_psk();
-    // PSK-derived key is used only to decrypt bootstrap beacons and encrypt the key-exchange response.
     let psk_key = crypto::derive_key_from_psk(&psk);
 
     let (data, used_psk) = decrypt_beacon(&state, &headers, &envelope.payload, &psk_key).await?;
@@ -404,7 +402,6 @@ async fn receive_beacon(
 
     let mut session_key_out: Option<String> = None;
     if used_psk {
-        // First contact: issue a fresh per-session AES key for all later traffic.
         let new_key = crypto::generate_session_key_hex();
         {
             let mut keys = state.session_keys.write().await;
@@ -448,7 +445,6 @@ async fn decrypt_beacon(
     payload: &str,
     psk_key: &[u8; 32],
 ) -> Result<(BeaconData, bool), StatusCode> {
-    // Bootstrap path: agent marks first beacon with bootstrap=true, encrypted under PSK.
     if let Ok(plaintext) = crypto::decrypt(payload, psk_key) {
         if let Ok(data) = serde_json::from_slice::<BeaconData>(&plaintext) {
             if data.bootstrap {
@@ -457,7 +453,6 @@ async fn decrypt_beacon(
         }
     }
 
-    // Session path: decrypt with the in-memory session key established after bootstrap.
     let agent_id = headers
         .get("X-Agent-Id")
         .and_then(|v| v.to_str().ok())

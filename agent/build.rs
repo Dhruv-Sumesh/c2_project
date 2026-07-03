@@ -1,6 +1,3 @@
-//! Compile-time configuration injection for educational agent builds.
-//! The build service sets C2_BUILD_* env vars before invoking `cargo build`.
-
 fn main() {
     let server_url = std::env::var("C2_BUILD_SERVER_URL")
         .unwrap_or_else(|_| "https://localhost:3443".to_string());

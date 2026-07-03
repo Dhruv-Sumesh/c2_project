@@ -8,10 +8,6 @@ import {
   getDefaultServerUrl,
 } from '../api/c2Api';
 
-/**
- * Educational agent build modal — compiles cross-platform agent binaries
- * with embedded C2 configuration (server URL, PSK, beacon interval).
- */
 export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
   const [targetOs, setTargetOs] = useState('windows');
   const [serverUrl, setServerUrl] = useState(getDefaultServerUrl());
