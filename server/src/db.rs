@@ -2,11 +2,8 @@ use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
 
-/// Default beacon polling interval in seconds (server-wide fallback).
 pub const DEFAULT_BEACON_INTERVAL_SECS: u64 = 30;
-/// Minimum allowed beacon interval enforced on server and agent.
 pub const MIN_BEACON_INTERVAL_SECS: u64 = 5;
-/// Maximum allowed beacon interval enforced on server and agent.
 pub const MAX_BEACON_INTERVAL_SECS: u64 = 3600;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -24,7 +21,6 @@ fn default_beacon_interval() -> u64 {
     DEFAULT_BEACON_INTERVAL_SECS
 }
 
-/// Clamp and validate a requested beacon interval.
 pub fn validate_beacon_interval(secs: u64) -> Result<u64, String> {
     if secs < MIN_BEACON_INTERVAL_SECS || secs > MAX_BEACON_INTERVAL_SECS {
         return Err(format!(
@@ -148,7 +144,6 @@ impl Database {
             [],
         ).expect("failed to create agents table");
 
-        // Migrate older databases that lack the interval column.
         let _ = conn.execute(
             "ALTER TABLE agents ADD COLUMN beacon_interval_secs INTEGER NOT NULL DEFAULT 30",
             [],
@@ -567,8 +562,6 @@ impl Database {
         Ok(())
     }
 
-    // --- Agent builds ---
-
     pub fn insert_agent_build(&self, build: &AgentBuild) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -657,7 +650,6 @@ impl Database {
         }
     }
 
-    // --- File transfers ---
 
     pub fn insert_file_transfer(&self, transfer: &FileTransfer) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
@@ -754,7 +746,6 @@ impl Database {
         Ok(transfers)
     }
 
-    // --- Broadcast history ---
 
     pub fn insert_broadcast(&self, record: &BroadcastHistory) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();

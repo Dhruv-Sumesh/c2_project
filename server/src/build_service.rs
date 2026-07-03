@@ -33,6 +33,13 @@ pub struct TargetInfo {
     pub extension: &'static str,
 }
 
+struct BuildPlan {
+    tool: String,
+    use_target_flag: bool,
+    use_cross: bool,
+    linker_env: Option<(String, String)>,
+}
+
 fn host_os() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
@@ -81,16 +88,102 @@ pub fn resolve_target(target_os: &str) -> Result<TargetInfo, String> {
     }
 }
 
-fn is_native_build(target_os: &str) -> bool {
-    let os = host_os();
+fn linker_exists(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn mingw_linker_available() -> bool {
+    linker_exists("x86_64-w64-mingw32-gcc")
+}
+
+fn native_musl_linker(target: &str) -> Option<&'static str> {
     let arch = host_arch();
-    match target_os.to_lowercase().as_str() {
-        "binary" => true,
-        "linux" => os == "linux" && arch == "x86_64",
-        "linux-arm64" => os == "linux" && arch == "aarch64",
-        "linux-arm32" => os == "linux" && arch == "arm",
-        _ => false,
+    match target {
+        "x86_64-unknown-linux-musl" if arch == "x86_64" => Some("musl-gcc"),
+        "aarch64-unknown-linux-musl" if arch == "aarch64" => Some("musl-gcc"),
+        "armv7-unknown-linux-musleabihf" if arch == "arm" => Some("arm-linux-musleabihf-gcc"),
+        "armv7-unknown-linux-musleabihf" if arch == "aarch64" => {
+            if linker_exists("arm-linux-musleabihf-gcc") {
+                Some("arm-linux-musleabihf-gcc")
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
+}
+
+fn musl_linker_env(target: &str) -> Option<(String, String)> {
+    let linker = native_musl_linker(target)?;
+    let env_key = format!(
+        "CARGO_TARGET_{}_LINKER",
+        target.to_uppercase().replace('-', "_")
+    );
+    Some((env_key, linker.to_string()))
+}
+
+fn can_build_natively(target_os: &str, rust_target: &str) -> bool {
+    if rust_target == "native" {
+        return true;
+    }
+    if target_os == "windows" && host_os() == "linux" && mingw_linker_available() {
+        return true;
+    }
+    native_musl_linker(rust_target).is_some()
+}
+
+fn resolve_build_plan(target_os: &str, rust_target: &str) -> Result<BuildPlan, String> {
+    if rust_target == "native" {
+        return Ok(BuildPlan {
+            tool: "cargo".to_string(),
+            use_target_flag: false,
+            use_cross: false,
+            linker_env: None,
+        });
+    }
+
+    if can_build_natively(target_os, rust_target) {
+        return Ok(BuildPlan {
+            tool: "cargo".to_string(),
+            use_target_flag: true,
+            use_cross: false,
+            linker_env: musl_linker_env(rust_target),
+        });
+    }
+
+    if !cross_available() {
+        return Err(format!(
+            "Cross-compilation to '{}' ({}) requires `cross` but it is not installed.\n\
+             \n\
+             Run: ./scripts/setup-cross.sh\n\
+             \n\
+             On your host, these targets build natively without Docker:\n\
+             - ARM64 Kali: linux-arm64, windows (with mingw-w64)\n\
+             - x86_64 Kali: linux, windows (with mingw-w64)",
+            target_os, rust_target,
+        ));
+    }
+
+    if !docker_running() {
+        return Err(format!(
+            "Cross-compilation to '{}' ({}) requires Docker but it is not running.\n\
+             Start Docker: sudo systemctl start docker",
+            target_os, rust_target,
+        ));
+    }
+
+    Ok(BuildPlan {
+        tool: "cross".to_string(),
+        use_target_flag: true,
+        use_cross: true,
+        linker_env: None,
+    })
 }
 
 fn workspace_root() -> PathBuf {
@@ -216,8 +309,8 @@ pub async fn start_build(
 fn cross_available() -> bool {
     std::process::Command::new("cross")
         .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -226,25 +319,8 @@ fn cross_available() -> bool {
 fn docker_running() -> bool {
     std::process::Command::new("docker")
         .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn musl_linker_available(target: &str) -> bool {
-    let linker = if target.starts_with("aarch64") {
-        "aarch64-linux-musl-gcc"
-    } else if target.starts_with("armv7") {
-        "arm-linux-musleabihf-gcc"
-    } else {
-        "musl-gcc"
-    };
-    std::process::Command::new(linker)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -261,64 +337,46 @@ async fn run_build(
     extension: String,
 ) {
     let root = workspace_root();
-    let native = is_native_build(&target_os);
 
-    let (tool, use_target_flag, use_cross) = if target == "native" {
-        ("cargo".to_string(), false, false)
-    } else if native {
-        if !musl_linker_available(&target) {
-            let linker_pkg = if target.starts_with("aarch64") {
-                "musl-cross (aarch64-linux-musl-gcc)"
-            } else {
-                "musl-tools (musl-gcc)"
-            };
-            let msg = format!(
-                "Native build for '{}' requires the musl linker ({}) but it was not found.\n\
-                 \n\
-                 Install it with:\n\
-                 \n\
-                     sudo apt install musl-tools\n\
-                 \n\
-                 Then retry. Alternatively, install `cross` + Docker for Docker-based builds:\n\
-                 \n\
-                     ./scripts/setup-cross.sh",
-                target_os, linker_pkg
-            );
+    let plan = match resolve_build_plan(&target_os, &target) {
+        Ok(p) => p,
+        Err(msg) => {
             fail_build(&state, &build_id, &msg).await;
             return;
         }
-        ("cargo".to_string(), true, false)
-    } else {
-        if !cross_available() {
-            let msg = format!(
-                "Cross-compilation to '{}' ({}) requires `cross` but it is not installed.\n\
-                 \n\
-                 Run the setup script to install all dependencies:\n\
-                 \n\
-                     ./scripts/setup-cross.sh\n\
-                 \n\
-                 This will install `cross`, Docker images, and Rust targets.\n\
-                 Alternatively: cargo install cross --git https://github.com/cross-rs/cross",
-                target_os, target,
-            );
-            fail_build(&state, &build_id, &msg).await;
-            return;
-        }
-        if !docker_running() {
-            let msg = format!(
-                "Cross-compilation to '{}' ({}) requires Docker but it is not running.\n\
-                 \n\
-                 Start Docker and try again:\n\
-                 \n\
-                 Linux:  sudo systemctl start docker\n\
-                 macOS:  Open Docker Desktop",
-                target_os, target,
-            );
-            fail_build(&state, &build_id, &msg).await;
-            return;
-        }
-        ("cross".to_string(), true, true)
     };
+
+    if plan.tool == "cargo" && target != "native" {
+        if target_os == "windows" && !mingw_linker_available() {
+            fail_build(
+                &state,
+                &build_id,
+                "Windows build requires mingw-w64.\n\nInstall: sudo apt install mingw-w64",
+            )
+            .await;
+            return;
+        }
+        if target_os != "windows" && native_musl_linker(&target).is_none() {
+            let pkg = match target_os.as_str() {
+                "linux-arm64" => "musl-tools (provides musl-gcc on ARM64)",
+                "linux" => "musl-tools (provides musl-gcc)",
+                "linux-arm32" => "musl cross toolchain for armv7",
+                _ => "musl-tools",
+            };
+            fail_build(
+                &state,
+                &build_id,
+                &format!(
+                    "Native build for '{}' requires {} but linker was not found.\n\n\
+                     Install: sudo apt install musl-tools mingw-w64\n\
+                     Then retry, or run: ./scripts/setup-cross.sh",
+                    target_os, pkg
+                ),
+            )
+            .await;
+            return;
+        }
+    }
 
     log_info(
         &state.db,
@@ -326,15 +384,15 @@ async fn run_build(
         "Build",
         None,
         &format!(
-            "run_build started: id={} target={} tool={} native={} arch={} workspace={:?}",
-            build_id, target_os, tool, native, host_arch(), root
+            "run_build started: id={} target={} tool={} cross={} arch={} workspace={:?}",
+            build_id, target_os, plan.tool, plan.use_cross, host_arch(), root
         ),
     );
 
     let output_name = format!("agent_{}{}", build_id, extension);
     let output_path = format!("{}/{}", BUILDS_DIR, output_name);
 
-    let mut cmd = Command::new(&tool);
+    let mut cmd = Command::new(&plan.tool);
     cmd.current_dir(&root)
         .env("C2_BUILD_SERVER_URL", &server_url)
         .env("C2_BUILD_PSK", &psk)
@@ -342,24 +400,25 @@ async fn run_build(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if use_target_flag {
+    if plan.use_target_flag {
         cmd.args(["build", "-p", "agent", "--release", "--target", &target]);
     } else {
         cmd.args(["build", "-p", "agent", "--release"]);
     }
 
-    if use_cross {
-        cmd.env(
-            "CROSS_ENV",
-            "C2_BUILD_SERVER_URL,C2_BUILD_PSK,C2_BUILD_BEACON_INTERVAL",
-        );
+    if let Some((key, val)) = &plan.linker_env {
+        cmd.env(key, val);
+    }
+
+    if plan.use_cross && (host_arch() == "aarch64" || host_arch() == "arm") {
+        cmd.env("CROSS_CONTAINER_OPTS", "--platform linux/amd64");
     }
 
     let result = cmd.output().await;
 
     match result {
         Ok(output) if output.status.success() => {
-            let src = if !use_target_flag {
+            let src = if !plan.use_target_flag {
                 root.join("target/release/agent.exe")
                     .exists()
                     .then(|| root.join("target/release/agent.exe"))
@@ -411,7 +470,12 @@ async fn run_build(
                     }));
                 }
                 None => {
-                    fail_build(&state, &build_id, "Compiled binary not found in expected output path").await;
+                    fail_build(
+                        &state,
+                        &build_id,
+                        "Compiled binary not found in expected output path",
+                    )
+                    .await;
                 }
             }
         }
@@ -424,20 +488,21 @@ async fn run_build(
             } else {
                 combined
             };
-            let msg = if use_cross && (host_arch() == "aarch64" || host_arch() == "arm") {
-                format!("{}\n\n[!] ARM host detected. Cross-compiling non-native targets via Docker requires QEMU emulation, which can be unstable. Consider building the matching native target instead (e.g. 'Linux ARM64 / Kali ARM' on ARM Kali).", base_msg)
+            let msg = if plan.use_cross {
+                format!(
+                    "{}\n\nCross-arch Docker build failed. Tips:\n\
+                     - ARM Kali: build linux-arm64 or windows natively (no Docker)\n\
+                     - Run: ./scripts/setup-cross.sh (installs QEMU + cross images)\n\
+                     - Ensure Docker is running: sudo systemctl start docker",
+                    base_msg
+                )
             } else {
                 base_msg
             };
             fail_build(&state, &build_id, &msg).await;
         }
         Err(e) => {
-            let msg = if use_cross && (host_arch() == "aarch64" || host_arch() == "arm") {
-                format!("Build process error: {}\n\n[!] ARM host: try the 'Linux ARM64 / Kali ARM' native target.", e)
-            } else {
-                format!("Build process error: {}", e)
-            };
-            fail_build(&state, &build_id, &msg).await;
+            fail_build(&state, &build_id, &format!("Build process error: {}", e)).await;
         }
     }
 }
@@ -468,7 +533,11 @@ pub fn list_builds(db: &Database) -> Result<Vec<Value>, String> {
     Ok(builds
         .into_iter()
         .map(|b| {
-            let error_msg = if b.status == "failed" { Some(b.file_path.clone()) } else { None };
+            let error_msg = if b.status == "failed" {
+                Some(b.file_path.clone())
+            } else {
+                None
+            };
             serde_json::json!({
                 "id": b.id,
                 "target_os": b.target_os,

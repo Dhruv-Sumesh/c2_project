@@ -1,5 +1,3 @@
-//! Educational file transfer service — chunked upload/download between dashboard and agents.
-
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -55,7 +53,6 @@ fn transfer_storage_path(transfer_id: &str) -> String {
     format!("{}/{}", TRANSFERS_DIR, transfer_id)
 }
 
-/// POST /api/files/upload/:agent_id — push a server-side file to an agent.
 pub async fn initiate_upload_to_agent(
     State(state): State<ServerState>,
     Path(agent_id): Path<String>,
@@ -161,7 +158,6 @@ pub async fn initiate_upload_to_agent(
     })))
 }
 
-/// POST /api/files/download/:agent_id — request a file from an agent.
 pub async fn initiate_download_from_agent(
     State(state): State<ServerState>,
     Path(agent_id): Path<String>,
@@ -227,7 +223,6 @@ pub async fn initiate_download_from_agent(
     })))
 }
 
-/// GET /api/files/:transfer_id — transfer status and metadata.
 pub async fn get_transfer_status(
     State(state): State<ServerState>,
     Path(transfer_id): Path<String>,
@@ -260,7 +255,6 @@ pub async fn get_transfer_status(
     })))
 }
 
-/// GET /api/files/:transfer_id/chunks/:chunk_index — agent fetches upload chunk (encrypted).
 pub async fn get_transfer_chunk(
     State(state): State<ServerState>,
     Path((transfer_id, chunk_index)): Path<(String, usize)>,
@@ -316,7 +310,6 @@ pub async fn get_transfer_chunk(
     Ok(Json(crate::EncryptedEnvelope { payload: encrypted }))
 }
 
-/// POST /api/files/chunk — agent posts download chunk (encrypted).
 pub async fn receive_agent_chunk(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -438,7 +431,6 @@ pub async fn receive_agent_chunk(
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
-/// GET /api/files/agent/:agent_id — list transfers for an agent.
 pub async fn list_agent_transfers(
     State(state): State<ServerState>,
     Path(agent_id): Path<String>,

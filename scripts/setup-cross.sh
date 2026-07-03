@@ -24,14 +24,27 @@ echo "Host: ${OS} / ${ARCH}"
 
 if [ "${OS}" = "Linux" ]; then
     echo ""
-    echo "Installing musl toolchain packages..."
+    echo "Installing native and cross-compilation packages..."
     if command -v apt-get &>/dev/null; then
-        sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
-            mingw-w64 2>/dev/null && info "System cross-compile toolchains installed" || \
+        sudo apt-get update -qq
+        sudo apt-get install -y \
+            musl-tools \
+            mingw-w64 \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            binutils-arm-linux-gnueabihf \
+            qemu-user-static \
+            binfmt-support \
+            2>/dev/null && info "System toolchain packages installed" || \
             warn "Could not install all system packages. Some targets may require cross+Docker."
+        if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+            docker run --rm --privileged multiarch/qemu-user-static --reset -p yes 2>/dev/null && \
+                info "QEMU binfmt registered for cross-arch Docker builds" || \
+                warn "QEMU binfmt registration failed — cross-arch Docker may be unstable on ARM"
+        fi
     else
-        warn "Non-Debian Linux: install musl-tools and mingw-w64 manually."
+        warn "Non-Debian Linux: install musl-tools, mingw-w64, and qemu-user-static manually."
     fi
 fi
 
@@ -57,7 +70,7 @@ rustup target add armv7-unknown-linux-musleabihf 2>/dev/null && \
 echo ""
 echo "Checking for Docker (needed for cross-compilation across architectures)..."
 if ! command -v docker &>/dev/null; then
-    warn "Docker not found. Cross-arch builds (e.g. Windows, or ARM64 from x86_64) will need it."
+    warn "Docker not found. Cross-arch builds (e.g. x86_64 Linux from ARM) will need it."
     echo "  Install: sudo apt-get install docker.io && sudo usermod -aG docker \$USER"
 elif ! docker info &>/dev/null 2>&1; then
     warn "Docker installed but not running. Cross-arch builds will fail."
@@ -110,14 +123,14 @@ echo "  Build targets and strategy:"
 echo ""
 if [ "${ARCH}" = "aarch64" ] && [ "${OS}" = "Linux" ]; then
     echo "  You are on ARM64 Linux (Kali ARM):"
-    echo "    linux-arm64  → native cargo (fastest, no Docker)"
-    echo "    linux        → needs cross + Docker (QEMU x86_64 emulation)"
-    echo "    windows      → needs cross + Docker"
+    echo "    linux-arm64  → native cargo + musl-gcc (fast, no Docker)"
+    echo "    windows      → native cargo + mingw-w64 (fast, no Docker)"
+    echo "    linux        → cross + Docker (QEMU x86_64 emulation)"
 elif [ "${ARCH}" = "x86_64" ] && [ "${OS}" = "Linux" ]; then
     echo "  You are on x86_64 Linux (Kali AMD):"
-    echo "    linux        → native cargo (fastest, no Docker)"
-    echo "    linux-arm64  → needs cross + Docker"
-    echo "    windows      → needs cross + Docker"
+    echo "    linux        → native cargo + musl-gcc (fast, no Docker)"
+    echo "    windows      → native cargo + mingw-w64 (fast, no Docker)"
+    echo "    linux-arm64  → cross + Docker"
 else
     echo "    linux        → x86_64-unknown-linux-musl"
     echo "    linux-arm64  → aarch64-unknown-linux-musl"

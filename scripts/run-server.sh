@@ -27,9 +27,9 @@ echo ""
 echo "Host: ${OS} / ${ARCH}"
 
 if [ "${OS}" = "Linux" ] && [ "${ARCH}" = "aarch64" ]; then
-  echo "ARM64 Kali: 'Linux ARM64 / Kali ARM' builds natively. Other targets need cross+Docker."
+  echo "ARM64 Kali: linux-arm64 and windows build natively (no Docker). x86_64 Linux needs cross+Docker."
 elif [ "${OS}" = "Linux" ] && [ "${ARCH}" = "x86_64" ]; then
-  echo "x86_64 Kali: 'Linux x86_64' builds natively. Other targets need cross+Docker."
+  echo "x86_64 Kali: linux and windows build natively. ARM64 targets need cross+Docker."
 fi
 
 if ! command -v cross &>/dev/null; then

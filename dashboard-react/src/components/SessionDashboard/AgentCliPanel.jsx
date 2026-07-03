@@ -6,6 +6,7 @@ import {
   resolveCommandType,
   getLocalHelpText,
   eliminateSession,
+  startOperatorSession,
 } from '../../api/c2Api';
 
 const BEACON_WAIT_MS = 90000;
@@ -55,13 +56,15 @@ export function AgentCliPanel({ agent, isOpen, onClose, commandResults, isConnec
     setEntries([
       {
         type: 'system',
-        text: `Connected to ${agent.hostname} (${agent.id.slice(0, 8)}…). Persistent shell — cd, sudo, and env vars carry over between commands.`,
+        text: `Connected to ${agent.hostname} (${agent.id.slice(0, 8)}…). Beacon paused — cd, sudo, and env vars persist between commands.`,
       },
     ]);
     setInput('');
     setIsExecuting(false);
     setIsKilling(false);
     setPendingCommandId(null);
+
+    startOperatorSession(agent.id).catch(() => {});
   }, [agent?.id, clearTimers]);
 
   useEffect(() => {
@@ -167,7 +170,7 @@ export function AgentCliPanel({ agent, isOpen, onClose, commandResults, isConnec
       await eliminateSession(agent.id);
       appendEntry({
         type: 'response',
-        text: 'Session eliminated. Persistent shell will be killed on next beacon.\nWorking directory resets on the next command.',
+        text: 'Session eliminated. Shell killed and normal beacon interval restored.',
         status: 'error',
       });
     } catch (err) {

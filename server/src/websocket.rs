@@ -5,7 +5,7 @@ use axum::{
 use tokio::sync::{broadcast, RwLock};
 use serde_json::{json, Value};
 use futures_util::{StreamExt, SinkExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use crate::db::Database;
 use crate::sessions::SessionManager;
@@ -25,6 +25,7 @@ pub struct ServerState {
     pub tx: broadcast::Sender<Value>,
     pub command_queue: Arc<RwLock<HashMap<String, Vec<PendingCommand>>>>,
     pub session_keys: Arc<RwLock<HashMap<String, String>>>,
+    pub beacon_paused: Arc<RwLock<HashSet<String>>>,
 }
 
 pub async fn dashboard_ws_handler(

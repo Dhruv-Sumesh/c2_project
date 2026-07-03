@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 
-// Default operator credentials (frontend-only, change as needed)
 const OPERATOR_USER = 'operator';
 const OPERATOR_PASS = 'c2admin';
 
